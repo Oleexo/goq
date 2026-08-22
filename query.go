@@ -40,3 +40,9 @@ func (q Query[T]) ToSlice() []T {
 	}
 	return out
 }
+
+// iterPull adapts a push iterator to a pull iterator. Callers must call the
+// returned stop function; iter.Pull's coroutine is otherwise leaked.
+func iterPull[T any](s iter.Seq[T]) (next func() (T, bool), stop func()) {
+	return iter.Pull(s)
+}
