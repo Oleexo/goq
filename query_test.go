@@ -30,12 +30,30 @@ func TestFromNilSliceIsEmptyNotNilPanic(t *testing.T) {
 	}
 }
 
-// Seq and ToSlice are two exits from the same pipeline; they must never differ.
+// Seq and ToSlice are two exits from the same pipeline and must agree on the
+// elements they yield. They differ deliberately on emptiness: ToSlice promises
+// a non-nil slice, while slices.Collect over an empty iterator returns nil.
+// EquateEmpty covers that gap so the element comparison is what is under test.
 func TestSeqMatchesToSlice(t *testing.T) {
 	t.Parallel()
-	q := goq.From([]string{"a", "b", "c"})
-	if d := cmp.Diff(q.ToSlice(), slices.Collect(q.Seq())); d != "" {
-		t.Errorf("Seq/ToSlice diverged (-toSlice +seq):\n%s", d)
+	for _, tc := range []struct {
+		name string
+		q    goq.Query[string]
+	}{
+		{"non-empty", goq.From([]string{"a", "b", "c"})},
+		{"empty", goq.Empty[string]()},
+		{"zero value", goq.Query[string]{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if d := cmp.Diff(tc.q.ToSlice(), slices.Collect(tc.q.Seq()), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("Seq/ToSlice diverged (-toSlice +seq):\n%s", d)
+			}
+			// ToSlice's contract is stronger than Seq's: never nil.
+			if got := tc.q.ToSlice(); got == nil {
+				t.Error("ToSlice() returned nil, want a non-nil empty slice")
+			}
+		})
 	}
 }
 
@@ -47,6 +65,9 @@ func TestRange(t *testing.T) {
 	if got := goq.Range(0, 0).ToSlice(); len(got) != 0 {
 		t.Errorf("Range(0,0) = %v, want empty", got)
 	}
+	if got := goq.Range(5, -1).ToSlice(); len(got) != 0 {
+		t.Errorf("Range(5,-1) = %v, want empty", got)
+	}
 }
 
 func TestRepeatAndEmpty(t *testing.T) {
@@ -56,6 +77,9 @@ func TestRepeatAndEmpty(t *testing.T) {
 	}
 	if got := goq.Empty[int]().ToSlice(); len(got) != 0 {
 		t.Errorf("Empty = %v, want empty", got)
+	}
+	if got := goq.Repeat("x", -3).ToSlice(); len(got) != 0 {
+		t.Errorf("Repeat(x,-3) = %v, want empty", got)
 	}
 }
 
@@ -68,6 +92,9 @@ func TestFromMap(t *testing.T) {
 		return x.Key < y.Key
 	})); d != "" {
 		t.Errorf("FromMap mismatch (-want +got):\n%s", d)
+	}
+	if got := goq.FromMap[string, int](nil).ToSlice(); len(got) != 0 {
+		t.Errorf("FromMap(nil) = %v, want empty", got)
 	}
 }
 
