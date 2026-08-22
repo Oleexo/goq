@@ -6,10 +6,10 @@ import "runtime"
 type parOptions struct {
 	workers int
 	window  int
-	// ordered is set by AsOrdered (Task 18), not by any Option here. parMap
-	// does not yet branch on it — Task 18 adds that branch to the consumption
-	// loop — so it is unread until then.
-	ordered bool //nolint:unused // wired up by AsOrdered, added in Task 18
+	// ordered is set by AsOrdered, not by any Option here. parMap branches on
+	// it in its consumption loop to decide whether to reassemble source order
+	// via the reorder sink.
+	ordered bool
 }
 
 // Option configures a parallel pipeline. Pass options to AsParallel.

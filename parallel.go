@@ -89,6 +89,22 @@ func (q TryQuery[T]) AsParallel(opts ...Option) ParQuery[T] {
 // set operations.
 func (p ParQuery[T]) AsSequential() TryQuery[T] { return p.resolve() }
 
+// AsOrdered makes results arrive in source order rather than completion order.
+//
+// The engine tags each element with its source position and reassembles the
+// sequence in a sink buffer holding at most Window results. Ordering costs
+// latency and memory: one slow element delays every later one, and up to
+// Window results are retained meanwhile. Unordered is the default because it
+// is strictly faster.
+//
+// Because the option is applied when the pipeline is built, AsOrdered may be
+// written after the operators whose output it orders.
+func (p ParQuery[T]) AsOrdered() ParQuery[T] {
+	opts := p.opts
+	opts.ordered = true
+	return ParQuery[T]{build: p.build, opts: opts}
+}
+
 // Select applies f to each element across the worker pool.
 func (p ParQuery[T]) Select[R any](f func(T) R) ParQuery[R] {
 	return p.SelectCtx(func(_ context.Context, v T) (R, error) { return f(v), nil })
@@ -254,9 +270,65 @@ func parMap[T, R any](
 					workers = 1
 				}
 
+				// opts.window is normally >= 1 (newParOptions enforces it),
+				// but a zero-value ParQuery carries a zero-value parOptions
+				// with window == 0. Left unclamped, the ordered branch's
+				// defensive overflow check (len(pending) > window) would fire
+				// on the very first held result, reporting a spurious
+				// internal error instead of behaving like an unbuffered sink.
+				window := opts.window
+				if window < 1 {
+					window = 1
+				}
+
 				in := make(chan parResult[T]) // unbuffered: backpressure
 				out := make(chan parResult[R], workers)
 				panics := make(chan panicInfo, workers+1) // +1: producer can also panic
+
+				// The admission gate is what actually bounds the ordered
+				// sink's memory. Without it, a single pathologically slow
+				// element would not stop the producer from feeding workers
+				// further and further ahead: out is drained continuously by
+				// the consumer (see the ordered branch below), so its fixed
+				// capacity never backpressures the producer on its own, and
+				// the reorder sink's pending map would grow without limit —
+				// exactly the failure mode Window exists to prevent.
+				//
+				// admitWait blocks the producer from dispatching item idx
+				// until idx < admitNext+window; admitRelease advances
+				// admitNext (and wakes every blocked waiter) each time the
+				// ordered consumer emits the next expected result, which it
+				// does at the same point it advances its own next, so the two
+				// stay in lockstep. Gating happens on dispatch, before a
+				// worker ever sees the item, which is why the pool loop below
+				// needs no changes. Neither function is called when
+				// !opts.ordered, so unordered mode is unaffected.
+				var admitMu sync.Mutex
+				admitNext := 0
+				admitCh := make(chan struct{})
+				admitWait := func(ctx context.Context, idx int) bool {
+					for {
+						admitMu.Lock()
+						ok := idx < admitNext+window
+						ch := admitCh
+						admitMu.Unlock()
+						if ok {
+							return true
+						}
+						select {
+						case <-ch:
+						case <-ctx.Done():
+							return false
+						}
+					}
+				}
+				admitRelease := func() {
+					admitMu.Lock()
+					admitNext++
+					close(admitCh)
+					admitCh = make(chan struct{})
+					admitMu.Unlock()
+				}
 
 				var producer sync.WaitGroup
 				producer.Add(1)
@@ -288,6 +360,9 @@ func parMap[T, R any](
 					}()
 					i := 0
 					for v, err := range planOf(src)(ctx) {
+						if opts.ordered && !admitWait(ctx, i) {
+							return // cancelled while waiting for admission
+						}
 						select {
 						case in <- parResult[T]{idx: i, val: v, err: err}:
 						case <-ctx.Done():
@@ -307,8 +382,15 @@ func parMap[T, R any](
 						defer pool.Done()
 						defer func() {
 							if r := recover(); r != nil {
+								info := panicInfo{value: r, stack: debug.Stack()}
+								// Unwrap a nested AsParallel's PanicValue so
+								// nesting does not double-wrap it, mirroring
+								// the producer's recover above.
+								if pv, ok := r.(PanicValue); ok {
+									info = panicInfo{value: pv.Value, stack: pv.Stack}
+								}
 								select {
-								case panics <- panicInfo{value: r, stack: debug.Stack()}:
+								case panics <- info:
 								default:
 								}
 								cancel()
@@ -361,16 +443,61 @@ func parMap[T, R any](
 					}
 				}
 
-				for res := range out {
-					if res.err != nil {
-						var zero R
-						yield(zero, res.err)
-						stop()
-						return
+				if !opts.ordered {
+					for res := range out {
+						if res.err != nil {
+							var zero R
+							yield(zero, res.err)
+							stop()
+							return
+						}
+						if !yield(res.val, nil) {
+							stop() // consumer abandoned the pipeline
+							return
+						}
 					}
-					if !yield(res.val, nil) {
-						stop() // consumer abandoned the pipeline
-						return
+				} else {
+					// Reorder sink: hold results back until the next expected
+					// index arrives. The admission gate above is what actually
+					// keeps pending from growing past window-1 entries: the
+					// producer never dispatches an item more than window
+					// ahead of next, so at most window-1 results can ever
+					// arrive here before the one pending needs.
+					pending := make(map[int]parResult[R], window)
+					next := 0
+					for res := range out {
+						pending[res.idx] = res
+						for {
+							item, ok := pending[next]
+							if !ok {
+								break
+							}
+							delete(pending, next)
+							next++
+							admitRelease() // let the producer dispatch one more
+							if item.err != nil {
+								var zero R
+								yield(zero, item.err)
+								stop()
+								return
+							}
+							if !yield(item.val, nil) {
+								stop()
+								return
+							}
+						}
+						if len(pending) > window {
+							// Defensive: unreachable given the admission gate,
+							// which never lets more than window-1 results
+							// accumulate here. Failing loudly beats growing
+							// without limit if that reasoning is ever wrong.
+							var zero R
+							yield(zero, fmt.Errorf(
+								"goq: reorder buffer exceeded window %d; this is a bug",
+								window))
+							stop()
+							return
+						}
 					}
 				}
 
