@@ -2,6 +2,7 @@ package goq_test
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -72,13 +73,33 @@ func TestMemoize(t *testing.T) {
 // Memoize is eager by necessity: it must read the whole source to cache it.
 func TestMemoizeIsIdempotentUnderConcurrentUse(t *testing.T) {
 	t.Parallel()
-	q := goq.Range(0, 100).Memoize()
+
+	// seqcore.Counter is deliberately not concurrency-safe, so this test needs
+	// its own atomic-counting source: the point is to prove the source is
+	// enumerated ONCE across concurrent consumers, which output equality alone
+	// cannot show on a deterministic source.
+	var pulls atomic.Int64
+	src := func(yield func(int) bool) {
+		for i := range 100 {
+			pulls.Add(1)
+			if !yield(i) {
+				return
+			}
+		}
+	}
+
+	q := goq.FromSeq(src).Memoize()
 	done := make(chan []int, 2)
 	for range 2 {
 		go func() { done <- q.ToSlice() }()
 	}
 	a, b := <-done, <-done
+
 	if d := cmp.Diff(a, b); d != "" {
 		t.Errorf("concurrent enumerations differ (-a +b):\n%s", d)
+	}
+	if got := pulls.Load(); got != 100 {
+		t.Errorf("source pulled %d times across two concurrent enumerations, want 100 — "+
+			"Memoize enumerated the source more than once", got)
 	}
 }

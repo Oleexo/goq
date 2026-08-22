@@ -42,6 +42,10 @@ func (q Query[T]) ToMapLast[K comparable](key func(T) K) map[K]T {
 // such as FromChan. The cost is that every element is retained, so it must not
 // be used on an unbounded source. The underlying source is enumerated at most
 // once, even under concurrent use.
+//
+// If the source panics during the first enumeration, the panic propagates to
+// that caller, but the cache is left empty and considered populated: every
+// later enumeration of this Query then yields nothing rather than retrying.
 func (q Query[T]) Memoize() Query[T] {
 	var (
 		once   sync.Once
