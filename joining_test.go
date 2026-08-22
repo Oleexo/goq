@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/oleexo/goq"
+	"github.com/oleexo/goq/internal/seqcore"
 )
 
 type dept struct {
@@ -77,13 +78,27 @@ func TestJoinEmptyInputs(t *testing.T) {
 	}
 }
 
-// The inner sequence is buffered, but the outer must stream.
+// TestJoinStreamsOuter proves the outer side streams by counting pulls, not by
+// comparing output. An implementation that buffered the outer first would
+// produce the same result slice, so output equality cannot detect it — it
+// would, however, pull all 1,000,000 elements.
 func TestJoinStreamsOuter(t *testing.T) {
 	t.Parallel()
 	id := func(i int) int { return i }
-	got := goq.Range(0, 1000).Join(goq.From([]int{5}), id, id,
-		func(a, _ int) int { return a }).Take(1).ToSlice()
+	c := &seqcore.Counter{}
+
+	got := goq.FromSeq(c.Seq(1_000_000)).
+		Join(goq.From([]int{5}), id, id, func(a, _ int) int { return a }).
+		Take(1).
+		ToSlice()
+
 	if d := cmp.Diff([]int{5}, got); d != "" {
 		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+	// Outer elements 0..4 find no match against an inner of [5]; the sixth pull
+	// yields, and Take(1) then stops the pipeline. A buffered outer would pull
+	// all 1,000,000.
+	if pulls := c.Pulls(); pulls != 6 {
+		t.Errorf("outer pulled %d elements, want 6 — the outer side is not streaming", pulls)
 	}
 }
