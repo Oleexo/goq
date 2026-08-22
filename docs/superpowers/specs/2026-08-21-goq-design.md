@@ -21,7 +21,7 @@ necessary now.
 
 - Fluent, chainable, statically typed query composition.
 - Deferred execution; nothing runs until a terminal operator.
-- 50 query operators plus 7 source constructors.
+- 51 query operators plus 8 source constructors.
 - Concurrent sources (channels, ctx cancellation) and a PLINQ-style
   parallel engine.
 - Zero external dependencies.
@@ -138,26 +138,55 @@ nothing is pulled until a terminal operator ranges over it. `Query` holds
 
 Operator logic lives once in `internal/seqcore` as free functions over
 `iter.Seq` / `iter.Seq2`. The pipeline types are thin adapters. Without
-this, 50 operators across 3 engines is 150 hand-written implementations.
+this, ~50 operators across 3 engines is ~150 hand-written
+implementations.
 `seqcore` is also where semantics are unit-tested, independent of the
 fluent surface.
 
 ### 3.4 Re-enumeration
 
 A query is re-enumerable if and only if its source is. Slice-backed
-queries re-execute on each enumeration; channel-backed queries are
-single-shot and yield nothing on a second pass. This matches C#, which has
-the identical hazard for `IEnumerable` over a network stream. `.Memoize()`
-opts into caching, making any query re-enumerable at the cost of
-retaining elements. This must be documented prominently on `FromChan`.
+queries re-execute freely on each enumeration.
+
+Single-shot sources (`FromChan`) **must not** fail silently. They carry an
+atomic consumed-flag, and a second terminal call returns
+`goq.ErrConsumed` rather than an empty result:
+
+```go
+q := goq.FromChan(ch)
+a, err := q.ToSlice(ctx)   // ok
+b, err := q.ToSlice(ctx)   // nil, goq.ErrConsumed
+```
+
+`.Memoize()` opts into caching, making any query re-enumerable at the
+cost of retaining every element — which forfeits streaming, so it is
+opt-in only.
+
+**Known gap, accepted.** This guarantee reaches only sources whose
+terminals return an `error`, i.e. `TryQuery` and `ParQuery`. A caller who
+wraps a single-shot iterator in `FromSeq` gets a `Query[T]`, whose
+terminals have no error return, so re-enumeration there silently yields
+nothing. `FromSeq`'s godoc must state that the caller guarantees
+re-enumerability, and recommend `FromSeqTry` (which returns a
+`TryQuery[T]`) for single-shot iterators. Closing the gap properly would
+mean giving every `Query` terminal an error return, which would defeat
+the `(T, bool)` design.
 
 ## 4. Error model
 
-- `Query[T]` is infallible. Selectors are pure `func(T) R`.
+- `Query[T]` is infallible: no selector can fail, and no terminal
+  reports a pipeline error. Selectors are pure `func(T) R`.
 - Absence is `(T, bool)`, never a panic and never an `error`:
-  `First`, `Last`, `Single`, `ElementAt`, `Min`, `Max`. C#'s
-  `...OrDefault` twins collapse into the discarded bool — `v, _ :=
-  q.First()` is `FirstOrDefault()`.
+  `First`, `Last`, `ElementAt`, `Min`, `Max`. C#'s `...OrDefault` twins
+  collapse into the discarded bool — `v, _ := q.First()` is
+  `FirstOrDefault()`.
+- **`Single` is the one exception**, returning `(T, error)` with
+  `goq.ErrEmpty` / `goq.ErrMultiple`. `Single` exists to assert
+  uniqueness, and `ErrMultiple` means the caller's data-model assumption
+  is wrong — a different situation from "no match" and one that must be
+  distinguishable. Note this error describes the *cardinality of the
+  result set*, not a pipeline failure, so it does not contradict
+  `Query[T]` being infallible.
 - Failure enters via `...Err` operators (`SelectErr`, `WhereErr`,
   `SelectManyErr`) taking `func(T) (R, error)`, which yield a
   `TryQuery[R]`. A `...Ctx` variant takes `func(context.Context, T) (R,
@@ -170,6 +199,19 @@ retaining elements. This must be documented prominently on `FromChan`.
   complete one.
 - `ctx` cancellation surfaces as `context.Canceled` /
   `context.DeadlineExceeded` from the terminal operator.
+
+### 4.1 Sentinel errors
+
+All comparable with `errors.Is`, all declared in one file:
+
+| Sentinel | Meaning |
+|---|---|
+| `goq.ErrEmpty` | `Single` on an empty source |
+| `goq.ErrMultiple` | `Single` on a source with more than one element |
+| `goq.ErrConsumed` | second enumeration of a single-shot source (§3.4) |
+
+Callback errors are returned verbatim, never wrapped, so `errors.Is` and
+`errors.As` work against the caller's own error types.
 
 ## 5. Concurrency engines
 
@@ -215,7 +257,7 @@ a dedicated regression test (§7.3).
 
 ## 6. Operator inventory
 
-50 query operators and 7 source constructors. Go-native naming;
+51 query operators and 8 source constructors. Go-native naming;
 `docs/operators.md` carries the C# mapping (`ToArray`/`ToList` → `ToSlice`, `ToDictionary` → `ToMap`,
 `OrderByDescending` → `OrderByDesc`).
 
@@ -232,18 +274,22 @@ a dedicated regression test (§7.3).
 | Elements | `First`, `Last`, `Single`, `ElementAt` |
 | Quantifiers | `Any`, `All`, `Contains`, `SequenceEqual` |
 | Materialize | `ToSlice`, `ToMap[K]`, `ToSet`, `Memoize` |
-| Generators | `From`, `FromSeq`, `FromMap`, `FromChan`, `Range`, `Repeat`, `Empty` |
+| Interop | `Seq` |
+| Generators | `From`, `FromSeq`, `FromSeqTry`, `FromMap`, `FromChan`, `Range`, `Repeat`, `Empty` |
 
 Return shapes, to remove any ambiguity:
 
-- Elements (`First`, `Last`, `Single`, `ElementAt`) and extremum
-  aggregations (`Min`, `MinBy`, `Max`, `MaxBy`) return `(T, bool)`.
+- Elements (`First`, `Last`, `ElementAt`) and extremum aggregations
+  (`Min`, `MinBy`, `Max`, `MaxBy`) return `(T, bool)`.
+- `Single` returns `(T, error)` — see §4.
 - `Average[N]` returns `(float64, bool)` — false on an empty source,
   never a division by zero.
 - `Count` returns `int`; `Sum[N]` returns `N` (zero on empty).
-- `Single` returns `(T, false)` when the source holds zero *or* more than
-  one element; the bool does not distinguish those cases. C# throws
-  differently for each; we do not.
+- `Seq()` exposes the underlying iterator — `iter.Seq[T]` on `Query`,
+  `iter.Seq2[T, error]` on `TryQuery`/`ParQuery` (as `Seq(ctx)`). This is
+  the exit back into stdlib iteration (`slices.Collect`, `maps.Insert`,
+  plain `range`) and, with `FromSeq`, the library's only extension point —
+  §2.2 rules out an implementable interface.
 
 Set operators require `comparable` elements; the `...By[K]` variants lift
 that requirement to a `comparable` key, covering struct elements.
@@ -276,11 +322,19 @@ All tests under `-race`. Required cases:
 - ctx cancellation mid-flight returns a ctx error — the §5.3 regression;
 - error short-circuit stops the producer rather than draining it.
 
-### 7.4 Ordered-parallel equivalence
+### 7.4 Contract tests for the new semantics
+- `Single` returns `ErrEmpty` on empty and `ErrMultiple` on two-or-more,
+  asserted via `errors.Is`.
+- Second terminal call on a `FromChan` query returns `ErrConsumed`; the
+  same query after `.Memoize()` returns equal results twice.
+- `Seq()` output equals the corresponding `ToSlice()` output for every
+  operator, so the two exits cannot diverge.
+
+### 7.5 Ordered-parallel equivalence
 Fuzz with randomized per-element work durations, asserting
 `AsParallel().AsOrdered()` output is identical to the sequential result.
 
-### 7.5 Examples and benchmarks
+### 7.6 Examples and benchmarks
 `Example*` tests that compile, doubling as godoc. Benchmarks against
 hand-written loops so the abstraction's allocation cost is recorded rather
 than assumed.
