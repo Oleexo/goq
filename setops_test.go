@@ -28,6 +28,7 @@ func TestSetOperators(t *testing.T) {
 		{"Distinct", goq.Distinct(a).ToSlice(), []int{1, 2, 3}},
 		{"Union", goq.Union(a, b).ToSlice(), []int{1, 2, 3, 4}},
 		{"Intersect", goq.Intersect(a, b).ToSlice(), []int{3}},
+		{"Intersect dedupes receiver", goq.Intersect(goq.From([]int{1, 2, 2, 3}), goq.From([]int{2})).ToSlice(), []int{2}},
 		{"Except", goq.Except(a, b).ToSlice(), []int{1, 2}},
 		{"Intersect empty", goq.Intersect(a, goq.Empty[int]()).ToSlice(), []int{}},
 		{"Except empty", goq.Except(a, goq.Empty[int]()).ToSlice(), []int{1, 2, 3}},
