@@ -98,8 +98,8 @@ func (p ParQuery[T]) AsSequential() TryQuery[T] { return p.resolve() }
 // because it is strictly faster.
 //
 // Window also caps how many items may be in flight at once — the engine will
-// not compute an item more than Window positions ahead of the next one still
-// awaited — so effective parallelism becomes min(Workers, Window). The
+// not compute an item more than Window-1 positions ahead of the next one still
+// awaited — so effective parallelism is at most min(Workers, Window). The
 // default Window (four times Workers) never throttles; an explicitly small
 // Window does, down to full serialisation at Window(1).
 //
@@ -265,25 +265,28 @@ func parMap[T, R any](
 				ctx, cancel := context.WithCancel(parent)
 				defer cancel() // guarantees unwinding on every return below
 
-				// opts.workers is normally >= 1 (newParOptions enforces it),
-				// but a zero-value ParQuery carries a zero-value parOptions
-				// with workers == 0. Spawning zero workers would leave the
-				// producer's send permanently unmatched and deadlock stop()'s
-				// producer.Wait(), which is worse than the panic a nil build
-				// func would otherwise give — so clamp defensively here too.
+				// opts.workers is normally >= 1: every live path reaches
+				// parMap through newParOptions, which enforces the floor, and
+				// resolve now guards build == nil before it ever gets here.
+				// So a zero-value parOptions should be unreachable — but if
+				// that ever stops being true, spawning zero workers would
+				// leave the producer's send permanently unmatched and
+				// deadlock stop()'s producer.Wait(). Keep the clamp as
+				// defence in depth; it costs nothing on the live path.
 				workers := opts.workers
 				if workers < 1 {
 					workers = 1
 				}
 
-				// opts.window is normally >= 1 (newParOptions enforces it),
-				// but a zero-value ParQuery carries a zero-value parOptions
-				// with window == 0. This clamp is load-bearing for liveness,
-				// not just correctness: a zero-capacity admit channel (below)
-				// would make the producer's first admit send block forever
-				// (0 < 0+0 is never true), so in would never close, workers
-				// would never exit, out would never close, and the consumer
-				// would hang on `range out` indefinitely.
+				// opts.window is normally >= 1 for the same reason (see
+				// workers above) and should likewise be unreachable at zero.
+				// This clamp still matters if that ever stops holding: a
+				// zero-capacity admit channel (below) would make the
+				// producer's first admit send block forever (0 < 0+0 is never
+				// true), so in would never close, workers would never exit,
+				// out would never close, and the consumer would hang on
+				// `range out` indefinitely. Keep it — the cost of checking is
+				// far lower than the cost of a hang.
 				window := opts.window
 				if window < 1 {
 					window = 1

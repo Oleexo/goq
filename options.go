@@ -31,11 +31,11 @@ func Workers(n int) Option {
 // worker count. It has no effect unless AsOrdered is used.
 //
 // In ordered mode, Window also caps how many items may be in flight at once —
-// the producer will not dispatch an item more than Window positions ahead of
-// the next one the sink is waiting to emit — so effective parallelism becomes
-// min(Workers, Window). The default (four times Workers) exceeds Workers, so
-// it never throttles; only an explicitly small Window (e.g. Window(1)) serialises
-// the pipeline.
+// the producer will not dispatch an item more than Window-1 positions ahead of
+// the next one the sink is waiting to emit — so effective parallelism is at
+// most min(Workers, Window). The default (four times Workers) exceeds Workers,
+// so it never throttles; only an explicitly small Window (e.g. Window(1))
+// serialises the pipeline.
 func Window(n int) Option {
 	return func(o *parOptions) {
 		if n >= 1 {

@@ -11,6 +11,10 @@ import (
 // Query[[][]T] and so on without limit, which Go rejects as an instantiation
 // cycle. It therefore has no AsQuery method: leave it through Select, which
 // introduces a fresh element type, or through a terminal such as ToSlice.
+//
+// Chunking is a streaming operation: each batch is yielded as soon as it
+// fills, so a ChunkQuery over an unbounded source yields batches indefinitely
+// rather than never yielding at all — unlike GroupQuery, which must buffer.
 type ChunkQuery[T any] struct {
 	src iter.Seq[[]T]
 }

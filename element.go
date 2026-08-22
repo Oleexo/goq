@@ -1,7 +1,7 @@
 package goq
 
 // First returns the first element and true, or the zero value and false if the
-// source is empty. It pulls exactly one element.
+// source is empty. It pulls at most one element.
 //
 // C#'s FirstOrDefault is the same call with the bool discarded:
 //
@@ -81,7 +81,8 @@ func (q Query[T]) Any() bool {
 }
 
 // AnyWhere reports whether any element satisfies pred, stopping at the first
-// match.
+// match. If no element matches, it enumerates the whole source and therefore
+// never returns on an unbounded one.
 func (q Query[T]) AnyWhere(pred func(T) bool) bool {
 	for v := range q.Seq() {
 		if pred(v) {
@@ -92,7 +93,9 @@ func (q Query[T]) AnyWhere(pred func(T) bool) bool {
 }
 
 // All reports whether every element satisfies pred, stopping at the first that
-// does not. It returns true for an empty source, matching C#.
+// does not. It returns true for an empty source, matching C#. If every element
+// satisfies pred, All enumerates the whole source and therefore never returns
+// on an unbounded one.
 func (q Query[T]) All(pred func(T) bool) bool {
 	for v := range q.Seq() {
 		if !pred(v) {
@@ -102,7 +105,9 @@ func (q Query[T]) All(pred func(T) bool) bool {
 	return true
 }
 
-// Contains reports whether q yields v, stopping at the first match.
+// Contains reports whether q yields v, stopping at the first match. If v never
+// appears, it enumerates the whole source and therefore never returns on an
+// unbounded one.
 //
 // It is a function rather than a method because a method cannot require that
 // Query's element type be comparable.
@@ -116,7 +121,8 @@ func Contains[T comparable](q Query[T], v T) bool {
 }
 
 // SequenceEqual reports whether a and b yield equal elements in the same order
-// and have the same length.
+// and have the same length. If a and b are equal, it enumerates both in full
+// and therefore never returns if either is unbounded.
 //
 // It is a function rather than a method because a method cannot require that
 // Query's element type be comparable.
