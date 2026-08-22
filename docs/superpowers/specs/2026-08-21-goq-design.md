@@ -426,6 +426,12 @@ Return shapes, to remove any ambiguity:
 Set operators require `comparable` elements; the `...By[K]` variants lift
 that requirement to a `comparable` key, covering struct elements.
 
+**`ForEach` is a `TryQuery`/`ParQuery`-only terminal** and has no `Query`
+equivalent, so it does not appear in the table above. It exists for
+side-effecting work: `ForEach(ctx, fn)` calls `fn` per element and stops at the
+first error from either the pipeline or `fn`. Documented here because a reader
+scanning only the inventory would otherwise not know it exists.
+
 **The `...Err` / `...Ctx` variants are not counted separately.** Operators
 that can host a fallible callback (`Select`, `SelectMany`, `Where`,
 `Aggregate`, and the terminals) gain `...Err` and `...Ctx` forms on
