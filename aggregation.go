@@ -65,8 +65,8 @@ func (q Query[T]) Average[N Numeric](sel func(T) N) (float64, bool) {
 // MinBy returns the element with the smallest key, and false if the source is
 // empty. Ties resolve to the first element encountered.
 //
-// To find the minimum of a Query whose elements are themselves comparable,
-// use the package-level Min: a method cannot constrain its receiver's element type.
+// To find the minimum of a Query whose elements are themselves ordered, use
+// the package-level Min: a method cannot constrain its receiver's element type.
 func (q Query[T]) MinBy[K cmp.Ordered](key func(T) K) (T, bool) {
 	var (
 		best  T
@@ -85,8 +85,8 @@ func (q Query[T]) MinBy[K cmp.Ordered](key func(T) K) (T, bool) {
 // MaxBy returns the element with the largest key, and false if the source is
 // empty. Ties resolve to the first element encountered.
 //
-// To find the maximum of a Query whose elements are themselves comparable,
-// use the package-level Max: a method cannot constrain its receiver's element type.
+// To find the maximum of a Query whose elements are themselves ordered, use
+// the package-level Max: a method cannot constrain its receiver's element type.
 func (q Query[T]) MaxBy[K cmp.Ordered](key func(T) K) (T, bool) {
 	var (
 		best  T
