@@ -21,7 +21,7 @@ necessary now.
 
 - Fluent, chainable, statically typed query composition.
 - Deferred execution; nothing runs until a terminal operator.
-- 52 query operators plus 8 source constructors.
+- 56 query operators plus 8 source constructors.
 - Concurrent sources (channels, ctx cancellation) and a PLINQ-style
   parallel engine.
 - **Zero runtime dependencies.** Consumers of the module resolve nothing
@@ -382,22 +382,22 @@ the caller's goroutine already.
 
 ## 6. Operator inventory
 
-52 query operators and 8 source constructors. Go-native naming;
+56 query operators and 8 source constructors. Go-native naming;
 `docs/operators.md` carries the C# mapping (`ToArray`/`ToList` → `ToSlice`, `ToDictionary` → `ToMap`,
 `OrderByDescending` → `OrderByDesc`).
 
 | Family | Operators |
 |---|---|
 | Restriction | `Where` |
-| Projection | `Select[R]`, `SelectMany[R]`, `Zip[U,R]` |
+| Projection | `Select[R]`, `SelectIndex[R]`, `SelectMany[R]`, `SelectManySeq[R]`, `Zip[U,R]` |
 | Partitioning | `Take`, `TakeWhile`, `TakeLast`, `Skip`, `SkipWhile`, `SkipLast`, `Chunk` |
-| Ordering | `OrderBy[K]`, `OrderByDesc[K]`, `ThenBy[K]`, `ThenByDesc[K]`, `Reverse` |
+| Ordering | `OrderBy[K]`, `OrderByDesc[K]`, `OrderByFunc`, `ThenBy[K]`, `ThenByDesc[K]`, `Reverse` |
 | Grouping | `GroupBy[K]`, `GroupBySelect[K,R]`, `ToLookup[K]` |
 | Joins | `Join[U,K,R]`, `GroupJoin[U,K,R]` |
 | Sets | `Distinct`, `DistinctBy[K]`, `Concat`, `Union`, `UnionBy[K]`, `Intersect`, `IntersectBy[K]`, `Except`, `ExceptBy[K]` |
 | Aggregation | `Aggregate[A]`, `Count`, `Sum[N]`, `Min`, `MinBy[K]`, `Max`, `MaxBy[K]`, `Average[N]` |
 | Elements | `First`, `Last`, `Single`, `ElementAt` |
-| Quantifiers | `Any`, `All`, `Contains`, `SequenceEqual` |
+| Quantifiers | `Any`, `AnyWhere`, `All`, `Contains`, `SequenceEqual` |
 | Materialize | `ToSlice`, `ToMap[K]`, `ToMapLast[K]`, `ToSet`, `Memoize` |
 | Interop | `Seq` |
 | Generators | `From`, `FromSeq`, `FromSeqTry`, `FromMap`, `FromChan`, `Range`, `Repeat`, `Empty` |
