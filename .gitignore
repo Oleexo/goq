@@ -1,2 +1,12 @@
 # SDD workspace (scratch; not part of the project)
 .superpowers/
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Docusaurus / Node
+docs/node_modules/
+docs/build/
+docs/.docusaurus/

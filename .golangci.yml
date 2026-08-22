@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - gocritic
+    - errorlint
+    - unconvert
+    - unparam
+    - nilerr
+    - copyloopvar
+    - wastedassign
+    - thelper
+    - tparallel
+    - misspell
+    - predeclared
+    - makezero
+    - durationcheck
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+  exclusions:
+    paths:
+      - docs/
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
