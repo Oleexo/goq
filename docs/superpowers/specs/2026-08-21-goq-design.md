@@ -302,17 +302,30 @@ operators, and `Reverse` all require materialising the stream, so they are
 not available; reaching them requires an explicit `.AsSequential()`:
 
 ```go
-goq.From(urls).AsParallel(goq.Workers(8)).
+res, err := goq.From(urls).AsParallel(goq.Workers(8)).
     SelectErr(httpGet).
-    AsSequential().        // the barrier is visible, not implied
-    OrderBy(byLatency).
-    ToSlice()
+    AsSequential().          // the barrier: back to a sequential TryQuery
+    ToSlice(ctx)             // materialise, and handle the error here
+if err != nil {
+    return err
+}
+ordered := goq.From(res).OrderBy(byLatency).ToSlice()
 ```
 
 Full PLINQ parity would let one fluent call silently serialise and buffer
 an entire pipeline. Making the barrier a named transition keeps the cost
 where the reader can see it, and keeps the engine small enough to test
 exhaustively.
+
+**Note that `AsSequential()` returns a `TryQuery`, whose surface is also
+deliberately narrow** — it carries no ordering, grouping, or set operators
+either. So the route to those is through a terminal: materialise with
+`ToSlice(ctx)`, handle the error, then re-enter with `From`. An earlier
+draft of this spec showed `AsSequential().OrderBy(...)` chained fluently,
+which does not compile. The materialising form is arguably the better API
+regardless: ordering a fallible stream requires buffering it anyway, and
+routing through `ToSlice(ctx)` forces the caller to deal with the error
+*before* sorting rather than discovering it afterwards.
 
 ### 5.3 Required invariant: post-drain ctx check
 
