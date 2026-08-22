@@ -141,3 +141,50 @@ func SkipLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 		}
 	}
 }
+
+// FlatMap yields every element of every sequence produced by f, lazily.
+func FlatMap[T, R any](s iter.Seq[T], f func(T) iter.Seq[R]) iter.Seq[R] {
+	return func(yield func(R) bool) {
+		for v := range s {
+			for r := range f(v) {
+				if !yield(r) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// MapIndex is Map with a zero-based element index.
+func MapIndex[T, R any](s iter.Seq[T], f func(int, T) R) iter.Seq[R] {
+	return func(yield func(R) bool) {
+		i := 0
+		for v := range s {
+			if !yield(f(i, v)) {
+				return
+			}
+			i++
+		}
+	}
+}
+
+// Zip yields f applied to positionally paired elements of a and b, stopping
+// when either is exhausted.
+//
+// It pulls from b using iter.Pull and always calls the returned stop function,
+// including when the consumer breaks early; failing to do so leaks a coroutine.
+func Zip[A, B, R any](a iter.Seq[A], b iter.Seq[B], f func(A, B) R) iter.Seq[R] {
+	return func(yield func(R) bool) {
+		next, stop := iter.Pull(b)
+		defer stop()
+		for va := range a {
+			vb, ok := next()
+			if !ok {
+				return
+			}
+			if !yield(f(va, vb)) {
+				return
+			}
+		}
+	}
+}
