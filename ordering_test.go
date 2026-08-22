@@ -13,16 +13,6 @@ type emp struct {
 	Age  int
 }
 
-// staff is used by Task 11's grouping tests.
-//
-//nolint:unused
-func staff() []emp {
-	return []emp{
-		{"Cai", "ops", 41}, {"Ann", "eng", 34},
-		{"Dee", "ops", 22}, {"Bob", "eng", 34},
-	}
-}
-
 // orderingFixture is deliberately built so that the tie-breakers matter:
 // sorting by Dept alone, or by Name alone, each gives a DIFFERENT answer than
 // the full Dept → Age-desc → Name chain. That is what makes this test able to
