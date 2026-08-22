@@ -24,7 +24,8 @@ necessary now.
 - 51 query operators plus 8 source constructors.
 - Concurrent sources (channels, ctx cancellation) and a PLINQ-style
   parallel engine.
-- Zero external dependencies.
+- **Zero runtime dependencies.** Consumers of the module resolve nothing
+  beyond the standard library. Test-only dependencies are permitted (§9.1).
 
 ### Non-goals
 
@@ -302,8 +303,10 @@ callback, not new entries in the inventory.
 
 ## 7. Testing
 
-Stdlib `testing` only. No testify — test-only dependencies still land in
-consumers' `go.sum`.
+Stdlib `testing`, plus two test-only dependencies (§9.1):
+`github.com/google/go-cmp` for readable diffs and `go.uber.org/goleak`
+for leak detection. No testify — table-driven tests do not need an
+assertion DSL.
 
 ### 7.1 Semantics
 Table-driven tests per operator against `internal/seqcore`, each compared
@@ -316,11 +319,19 @@ A counting source asserting exact pull counts.
 regress silently into eager ones; only pull-count assertions catch it.
 
 ### 7.3 Concurrency
-All tests under `-race`. Required cases:
-- goroutine-leak assertion (before/after count) on every concurrent path,
-  including consumer-`break` and error short-circuit;
+All tests under `-race`. Leak detection uses `goleak.VerifyTestMain`,
+not a hand-rolled `runtime.NumGoroutine()` comparison — the counter
+approach is racy and needs an arbitrary sleep to avoid false positives,
+as the design probe demonstrated.
+
+Required cases:
+- no leaked goroutines on every concurrent path, including consumer-`break`
+  and error short-circuit;
 - ctx cancellation mid-flight returns a ctx error — the §5.3 regression;
 - error short-circuit stops the producer rather than draining it.
+
+`goleak` may need `IgnoreTopFunction` entries for runtime goroutines on
+some platforms; add them narrowly, never a blanket ignore.
 
 ### 7.4 Contract tests for the new semantics
 - `Single` returns `ErrEmpty` on empty and `ErrMultiple` on two-or-more,
@@ -426,7 +437,84 @@ Every page links `pkg.go.dev/github.com/oleexo/goq`.
 overview) remain, and are the entry points for readers who never visit the
 site.
 
-## 9. Risks
+## 9. Tooling and CI
+
+### 9.1 Dependencies
+
+| Scope | Policy |
+|---|---|
+| Runtime | none — standard library only |
+| Test | `github.com/google/go-cmp`, `go.uber.org/goleak` |
+| Docs | Node/npm, confined to `docs/` (§8.1) |
+
+Test dependencies appear in consumers' `go.sum` but are never built or
+linked into their binaries. Because `go.mod` now has entries, Dependabot
+must watch `gomod` in addition to `github-actions` and the `docs/` npm
+tree.
+
+### 9.2 golangci-lint
+
+Config at `.golangci.yml`, schema `version: "2"` — v2 moved formatters
+out of `linters` into their own `formatters` section and renamed
+`issues.exclude-files` to `linters.exclusions.paths`.
+
+Curated strict set: `errcheck`, `govet` (`enable-all`, minus
+`fieldalignment`), `staticcheck`, `unused`, `ineffassign`, `revive`,
+`gocritic`, `errorlint`, `unconvert`, `unparam`, `nilerr`, `copyloopvar`,
+`wastedassign`, `thelper`, `tparallel`, `misspell`, `predeclared`,
+`makezero`, `durationcheck`. Formatters: `gofmt`, `goimports`.
+
+`revive`'s `exported` rule is load-bearing, not decoration: §8.4 makes
+godoc the API reference, so a missing doc comment on an exported symbol is
+a documentation defect. The linter is what enforces the docs strategy.
+
+**Version constraint.** golangci-lint must be built with Go 1.27 or it
+cannot typecheck generic methods. Verified working: 2.13.1 (built with
+go1.27.0) type-checks inside generic method bodies and reports no
+false positives on the satellite types or `iter.Seq` closures. The
+golangci-lint-action docs currently show `v2.12`, which predates Go 1.27 —
+do not copy that pin.
+
+### 9.3 Workflows
+
+Four files, deliberately separate so a docs failure cannot block a Go
+change:
+
+| File | Trigger | Contents |
+|---|---|---|
+| `ci.yml` | push `main`, PR | build, vet, `go test -race -shuffle=on -covermode=atomic` |
+| `lint.yml` | push `main`, PR | `golangci/golangci-lint-action@v9` |
+| `docs.yml` | push `main`, PR | Docusaurus build; deploy on `main` only (§8.3) |
+| `dependabot.yml` | schedule | `gomod`, `github-actions`, npm in `/docs` |
+
+Practices applied to all of them:
+
+- least-privilege `permissions: contents: read` at the top level, widened
+  per-job only where required (`pages: write` + `id-token: write` for the
+  docs deploy, `pull-requests: read` for lint annotations);
+- `concurrency` group keyed on workflow and ref with
+  `cancel-in-progress: true`, so superseded pushes stop immediately;
+- `timeout-minutes` on every job, so a hung test cannot burn an hour;
+- `actions/checkout@v6`, `actions/setup-go@v6`, pinned by major version;
+  `fetch-depth: 0` for the lint job;
+- Go toolchain pinned `1.27.x` — dependency caching comes from
+  `setup-go`'s built-in cache, keyed on `go.sum`.
+
+**The test matrix is OS-only:** `ubuntu-latest`, `macos-latest`,
+`windows-latest`, with `fail-fast: false`. Generic methods make 1.27 both
+the floor and the ceiling, so there is no Go-version axis to vary. The OS
+spread is what earns its cost here — it is what catches timing-sensitive
+assumptions in the concurrency tests.
+
+`ci.yml` runs `go vet` even though `govet` also runs inside
+golangci-lint. That redundancy is intentional: `ci.yml` must be
+meaningful on its own if the lint workflow is disabled or fails to install.
+
+Coverage is measured (`-covermode=atomic`) but not uploaded; adding a
+coverage service would mean a third-party integration and a repository
+secret. Deferred, not overlooked.
+
+## 10. Risks
 
 1. **The parallel ordered engine is the only genuinely hard component.**
    Everything else is a well-understood loop. Build and test it before any
@@ -449,3 +537,10 @@ site.
 6. **Two build systems in one repo.** Contributors touching only Go must
    never need Node. Keep the docs workflow separate from the Go workflow
    so a docs failure cannot block a Go change, and vice versa.
+7. **The toolchain around generic methods is very new.** golangci-lint
+   2.13.1 is confirmed working (§9.2), but other tooling a contributor
+   might reach for — standalone `staticcheck`, older editor language
+   servers, code generators — may not parse method type parameters yet.
+   `CONTRIBUTING.md` should state the minimum golangci-lint version and
+   that `go build`/`go vet` from Go 1.27 are the authority. Expect to
+   raise pinned versions more often than a mature-syntax project would.
