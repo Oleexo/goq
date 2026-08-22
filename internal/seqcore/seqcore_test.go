@@ -43,13 +43,20 @@ func TestMapIsLazy(t *testing.T) {
 	}
 }
 
-func TestFilterTerminatesOnInfiniteSource(t *testing.T) {
+// TestFilterIsLazy asserts an exact pull count over a LARGE FINITE source.
+// An eager Filter drains all 1,000,000 and fails this assertion immediately;
+// it does not hang, so the failure is fast and names its own cause.
+func TestFilterIsLazy(t *testing.T) {
 	t.Parallel()
-	// If Filter were eager this test would hang rather than fail.
-	for v := range seqcore.Filter(seqcore.Infinite(), func(i int) bool { return i > 5 }) {
+	c := &seqcore.Counter{}
+	for v := range seqcore.Filter(c.Seq(1_000_000), func(i int) bool { return i > 5 }) {
 		if v != 6 {
 			t.Errorf("got %d, want 6", v)
 		}
 		break
+	}
+	// 0..5 rejected, 6 accepted and yielded, then the consumer stops: 7 pulls.
+	if got := c.Pulls(); got != 7 {
+		t.Errorf("Filter pulled %d elements, want 7 — operator is not lazy", got)
 	}
 }
