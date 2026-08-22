@@ -30,7 +30,8 @@ func (q Query[T]) OrderByDesc[K cmp.Ordered](key func(T) K) OrderedQuery[T] {
 }
 
 // OrderByFunc sorts using an explicit three-way comparison, for element types
-// whose ordering is not expressible as a cmp.Ordered key.
+// whose ordering is not expressible as a cmp.Ordered key. Sorting is stable:
+// elements comparing equal keep their source order.
 func (q Query[T]) OrderByFunc(cmpFn func(a, b T) int) OrderedQuery[T] {
 	return OrderedQuery[T]{src: q.Seq(), cmps: []func(a, b T) int{cmpFn}}
 }
@@ -58,7 +59,9 @@ func (o OrderedQuery[T]) ThenByDesc[K cmp.Ordered](key func(T) K) OrderedQuery[T
 	return OrderedQuery[T]{src: o.src, cmps: appendCmp(o.cmps, descending(key))}
 }
 
-// Seq returns the sorted pipeline as an iterator.
+// Seq returns the sorted pipeline as an iterator. Each call to Seq re-collects
+// and re-sorts the source, so enumerate only once or use Memoize if the result
+// must be reused.
 func (o OrderedQuery[T]) Seq() iter.Seq[T] {
 	return func(yield func(T) bool) {
 		buf := slices.Collect(o.src)
@@ -100,8 +103,14 @@ func descending[T any, K cmp.Ordered](key func(T) K) func(a, b T) int {
 	return func(a, b T) int { return cmp.Compare(key(b), key(a)) }
 }
 
-// appendCmp copies before appending so that branching a chain — building two
-// different ThenBy chains from one OrderedQuery — cannot alias the slice.
+// appendCmp returns a new comparator slice with add appended, copying rather
+// than appending in place so that two ThenBy chains branched from the same
+// OrderedQuery cannot alias each other's comparators.
+//
+// Today that copy is belt-and-braces: every slice this produces has
+// len == cap, and OrderBy seeds one with len == cap == 1, so an in-place
+// append would reallocate anyway. Keep the copy — it is what makes the
+// guarantee hold if a future change ever introduces spare capacity.
 func appendCmp[T any](existing []func(a, b T) int, add func(a, b T) int) []func(a, b T) int {
 	out := make([]func(a, b T) int, 0, len(existing)+1)
 	out = append(out, existing...)

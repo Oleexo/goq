@@ -13,6 +13,9 @@ type emp struct {
 	Age  int
 }
 
+// staff is used by Task 11's grouping tests.
+//
+//nolint:unused
 func staff() []emp {
 	return []emp{
 		{"Cai", "ops", 41}, {"Ann", "eng", 34},
@@ -20,16 +23,33 @@ func staff() []emp {
 	}
 }
 
+// orderingFixture is deliberately built so that the tie-breakers matter:
+// sorting by Dept alone, or by Name alone, each gives a DIFFERENT answer than
+// the full Dept → Age-desc → Name chain. That is what makes this test able to
+// fail if ThenBy stops appending.
+func orderingFixture() []emp {
+	return []emp{
+		{"Zoe", "eng", 30},
+		{"Ann", "eng", 40},
+		{"Dee", "ops", 20},
+		{"Bob", "ops", 20},
+	}
+}
+
 func TestOrderByThenBy(t *testing.T) {
 	t.Parallel()
-	got := goq.From(staff()).
+	got := goq.From(orderingFixture()).
 		OrderBy(func(e emp) string { return e.Dept }).
 		ThenByDesc(func(e emp) int { return e.Age }).
 		ThenBy(func(e emp) string { return e.Name }).
 		Select(func(e emp) string { return e.Name }).
 		ToSlice()
-	// eng before ops; within eng, age 34 twice so Name breaks the tie.
-	if d := cmp.Diff([]string{"Ann", "Bob", "Cai", "Dee"}, got); d != "" {
+	// eng before ops; within eng, Age desc puts Ann(40) before Zoe(30);
+	// within ops, Age ties at 20 so Name breaks it: Bob before Dee.
+	//
+	// This expectation discriminates: ThenBy as a no-op gives
+	// [Zoe Ann Dee Bob], and ThenBy resetting gives [Ann Bob Dee Zoe].
+	if d := cmp.Diff([]string{"Ann", "Zoe", "Bob", "Dee"}, got); d != "" {
 		t.Errorf("mismatch (-want +got):\n%s", d)
 	}
 }
@@ -42,16 +62,38 @@ func TestOrderByDesc(t *testing.T) {
 	}
 }
 
-// Sorting must be stable: equal keys keep source order.
+// TestOrderByIsStable needs enough elements, and enough interleaved keys, to
+// force pdqsort to actually partition. A small all-equal-key fixture is
+// already in sorted order, so Go's unstable sort short-circuits and preserves
+// it — measured: 3 and 50 elements with one key do NOT discriminate, while 64
+// elements across 4 keys do.
 func TestOrderByIsStable(t *testing.T) {
 	t.Parallel()
-	src := []emp{{"first", "x", 1}, {"second", "x", 1}, {"third", "x", 1}}
-	got := goq.From(src).
-		OrderBy(func(e emp) int { return e.Age }).
-		Select(func(e emp) string { return e.Name }).
-		ToSlice()
-	if d := cmp.Diff([]string{"first", "second", "third"}, got); d != "" {
-		t.Errorf("unstable sort (-want +got):\n%s", d)
+	type item struct{ Key, Seq int }
+
+	const (
+		n    = 64
+		keys = 4
+	)
+	src := make([]item, 0, n)
+	for i := range n {
+		src = append(src, item{Key: i % keys, Seq: i})
+	}
+
+	sorted := goq.From(src).OrderBy(func(x item) int { return x.Key }).ToSlice()
+
+	if len(sorted) != n {
+		t.Fatalf("got %d elements, want %d", len(sorted), n)
+	}
+	// Within each key group, original sequence numbers must stay ascending.
+	// An unstable sort permutes them; a stable one cannot.
+	lastSeq := make(map[int]int, keys)
+	for i, x := range sorted {
+		if prev, seen := lastSeq[x.Key]; seen && x.Seq < prev {
+			t.Errorf("unstable sort at index %d: key %d saw Seq %d after %d",
+				i, x.Key, x.Seq, prev)
+		}
+		lastSeq[x.Key] = x.Seq
 	}
 }
 
