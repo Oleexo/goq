@@ -274,6 +274,12 @@ a time — over a concurrent source.
 - Unordered by default. `AsOrdered()` tags elements with sequence numbers
   and reassembles them in a sink buffer capped at `window` — that cap is
   what bounds memory when a single element is pathologically slow.
+- **`Window` is therefore a DISPATCH bound in ordered mode, not just a buffer
+  bound.** Effective parallelism becomes `min(workers, window)`, so
+  `Window(1)` serialises the pipeline regardless of `Workers(n)`. The default
+  (`4×workers`) exceeds `workers`, so default throughput is unaffected; only an
+  explicitly small window throttles. Both `Window`'s and `AsOrdered`'s godoc
+  must say so.
 - **The cap is enforced by a producer-side admission gate, not by the sink.**
   The producer blocks before dispatching index `i` until `i < emitted +
   window`, so at most `window` results can ever be outstanding. An earlier
