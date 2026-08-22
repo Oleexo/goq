@@ -149,8 +149,16 @@ removed, since `OrderedQuery` itself has `AsQuery()`.
 - `GroupQuery[K,T]` and `ChunkQuery[T]` **must not**. Their only exits are
   `Select[R] → Query[R]` (fresh `R`) and non-`Query` terminals such as
   `ToSlice() []Group[K,T]`.
-- Satellites **do** carry every element-preserving operator: `Where`,
-  `Take`, `Skip`, `Distinct`, `Reverse`, and ordering. Ordering on a
+- Satellites **may** carry any element-preserving operator: `Where`, `Take`,
+  `Skip`, `Distinct`, `Reverse`, and ordering are all legal on them.
+  **As built, none of them carry `Take`/`Skip`/`Distinct`/`Reverse`**, and the
+  three differ from each other: `GroupQuery` has `Where`, ordering and `Count`;
+  `ChunkQuery` has `Where` and `Count` but no ordering; `OrderedQuery` has
+  ordering and `AsQuery` but no `Where` or `Count`. `OrderedQuery` escapes via
+  `AsQuery`; the other two escape via the identity projection
+  `.Select(func(x T) T { return x })`, which returns a full `Query[T]` — that is
+  the general satellite escape hatch and it should be documented as such.
+  Widening the satellite surfaces is post-v0.1.0 work. Ordering on a
   satellite returns *the same satellite type* with an accumulated
   comparator list, never an `OrderedQuery`. Verified:
   `From(people).GroupBy(dept).OrderBy(size).ThenBy(key).Select(fmt).ToSlice()`
@@ -175,12 +183,23 @@ nothing is pulled until a terminal operator ranges over it. `Query` holds
 
 ### 3.3 Shared operator core
 
-Operator logic lives once in `internal/seqcore` as free functions over
-`iter.Seq` / `iter.Seq2`. The pipeline types are thin adapters. Without
-this, ~50 operators across 3 engines is ~150 hand-written
-implementations.
-`seqcore` is also where semantics are unit-tested, independent of the
-fluent surface.
+**As built, this is narrower than originally specified, and the record should
+say so.** The intent was that operator logic live once in `internal/seqcore` as
+free functions over `iter.Seq` and `iter.Seq2`, with all three pipeline types as
+thin adapters — the argument being that ~50 operators across 3 engines would
+otherwise be ~150 hand-written implementations.
+
+What exists: `seqcore` holds 11 functions, all over `iter.Seq`, imported by
+`filtering.go` and `projection.go` only. `try_operators.go` implements its own
+stages over `iter.Seq2`, and `parallel.go` shares nothing with `seqcore`. So the
+sharing covers 11 of 56 operators for 1 of 3 engines.
+
+The feared explosion did not materialise anyway, because `TryQuery` and
+`ParQuery` carry far smaller operator sets than `Query` — the duplication is a
+handful of loops, not fifty. But the drift the sharing was meant to prevent is
+latent: `seqcore.Take` and `TryQuery.Take` are independent implementations with
+independently chosen error-versus-index ordering. Consolidating them, or
+accepting the duplication explicitly and testing both, is post-v0.1.0 work.
 
 ### 3.4 Re-enumeration
 
@@ -447,10 +466,11 @@ operator's godoc, not merely noted here.
 
 | Behaviour | Operators |
 |---|---|
-| Streaming — O(1) extra memory | `Where`, `Select`, `SelectMany`, `Take`, `TakeWhile`, `Skip`, `SkipWhile`, `Zip`, `Concat`, `Chunk`, `Any`, `All`, `Contains`, `First`, `ElementAt`, `Count`, `Sum`, `Aggregate` |
-| Bounded buffer | `TakeLast(n)`, `SkipLast(n)` — retain n elements |
-| Full materialisation | `OrderBy`, `ThenBy`, `Reverse`, `GroupBy`, `ToLookup`, `Distinct`, `DistinctBy`, `Union`, `Intersect`, `Except` and their `...By` forms, `Memoize`, `ToSlice`, `ToMap`, `ToSet` |
-| Materialises the *argument*, streams the receiver | `Intersect`, `Except`, `Union` build a set from the other sequence |
+| Streaming — O(1) extra memory | `Where`, `Select`, `SelectIndex`, `SelectMany`, `SelectManySeq`, `Take`, `TakeWhile`, `Skip`, `SkipWhile`, `Zip`, `Concat`, `Chunk`, `Any`, `AnyWhere`, `All`, `Contains`, `First`, `ElementAt`, `Count`, `Sum`, `Aggregate` |
+| Streaming, but retains a growing key set | `Distinct`, `DistinctBy`, `Union`, `UnionBy` — each yields as it goes, keeping every distinct element or key seen so far. Memory grows with the number of *distinct* values encountered, not with the size of the source, so these are safe on an unbounded source of low cardinality and unsafe on one of high cardinality. |
+| Bounded buffer | `TakeLast(n)`, `SkipLast(n)` — retain n (respectively n+1) elements |
+| Materialises the *argument*, streams the receiver | `Intersect`, `IntersectBy`, `Except`, `ExceptBy` — each drains the *other* sequence into a key set before yielding anything, then streams the receiver. Passing an unbounded sequence as the argument hangs; as the receiver it is fine. |
+| Full materialisation | `OrderBy`, `OrderByDesc`, `OrderByFunc`, `ThenBy`, `ThenByDesc`, `Reverse`, `GroupBy`, `GroupBySelect`, `ToLookup`, `Memoize`, `ToSlice`, `ToMap`, `ToMapLast`, `ToSet` |
 
 `Last`, `Single`, `Min`, `Max`, and `Average` stream in O(1) memory but
 must reach the end of the source, so they too never return on an
@@ -703,6 +723,22 @@ rediscovered as gaps:
 | `Cast`/`OfType` | reflection defeats the type system (§1) |
 | IQueryable/SQL | no expression trees in Go (§1) |
 | Parallel `Aggregate` with combiner | `ParQuery` stays element-wise (§5.2) |
+
+### 9.6 Known gaps in v0.1.0
+
+Found by the final whole-branch review, after the tag. Recorded here rather
+than fixed, because each is **additive** — a v0.2.0 can add them without
+breaking a v0.1.0 caller.
+
+| Gap | Detail |
+|---|---|
+| Missing `...Err` / `...Ctx` variants | §4 and §6 state the rule that `Select`, `SelectMany`, `Where`, `Aggregate` and the terminals all gain fallible forms. Only `Select` follows it: `Where` has `Err` but no `Ctx`, and `SelectMany` and `Aggregate` have neither. `SelectManyErr` is named explicitly in §4 and does not exist. |
+| `ParQuery.WhereErr` / `WhereCtx` | §5.2 names them verbatim. A fallible parallel filter — a parallel HEAD check, parallel validation — is the most obviously missing operator in the library. |
+| `ParQuery.First` and `ParQuery.Seq(ctx)` | §3.1's table gives `ParQuery`'s terminal shape as "as `TryQuery`", and §6 promises `Seq(ctx)` on both fallible types. Callers must currently route through `AsSequential()`. |
+| `TryQuery`'s operator set is undocumented as a rule | `ParQuery`'s narrowness is principled and explained (§5.2: ordering and grouping need materialising, so the barrier is visible). `TryQuery`'s is not: `Any`, `All`, `ElementAt`, `ToMap` and `SkipWhile` are absent although all are O(1)-streaming and would work unchanged, and `TakeWhile` is present while `SkipWhile` is not. The subset reads as accreted rather than chosen. |
+| No benchmarks | §7.6 requires them, and §10 risk 3 (generic-method compile time and code size) depends on them. The requirement was dropped when the plan was written, not deferred at implementation time, so it never reached §9.5. Also means the `ParQuery.Where` boxing cost cannot be evaluated either way. |
+| `seqcore` unit tests | §7.1 asks for table-driven tests per operator against `internal/seqcore`; coverage there is 15%, with 9 of 11 functions at zero. They are covered transitively through the fluent surface, so this is a strategy divergence rather than a hole — but it forfeits the "semantics tested independent of the fluent surface" property. |
+| Satellite operator breadth | See §3.1.1: none of the three satellites carries `Take`/`Skip`/`Distinct`/`Reverse`, and they differ from each other. |
 
 ## 10. Risks
 
