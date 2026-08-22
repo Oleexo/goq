@@ -643,6 +643,33 @@ Coverage is measured (`-covermode=atomic`) but not uploaded; adding a
 coverage service would mean a third-party integration and a repository
 secret. Deferred, not overlooked.
 
+### 9.4 License and versioning
+
+- **MIT**, `LICENSE` at the repo root, `Copyright (c) 2026 Oleexo`.
+  Without a license file nobody may legally use the module, so this is a
+  release blocker rather than paperwork.
+- **First release `v0.1.0`.** Go tooling treats `v0` as explicitly
+  unstable, so breaking changes need no `/v2` module path. That headroom
+  is worth keeping: satellite-type composition (§3.1.1) and the parallel
+  engine (§5.2) will meet real usage for the first time, and the language
+  behaviour they rest on is only weeks old.
+- Tag-only releases; Go needs no publish step. Move to `v1.0.0` once the
+  operator surface has survived outside use.
+
+### 9.5 Deferred, on the record
+
+Not oversights — decided against for v1, listed so they are not
+rediscovered as gaps:
+
+| Item | Why deferred |
+|---|---|
+| `ToChan` sink | pipelines cannot yet feed an existing channel graph |
+| Docs search (§8.2) | Algolia needs an application; local plugin is the fallback |
+| Coverage upload (§9.3) | needs a third-party integration and a repo secret |
+| `Cast`/`OfType` | reflection defeats the type system (§1) |
+| IQueryable/SQL | no expression trees in Go (§1) |
+| Parallel `Aggregate` with combiner | `ParQuery` stays element-wise (§5.2) |
+
 ## 10. Risks
 
 1. **The parallel ordered engine is the only genuinely hard component.**
