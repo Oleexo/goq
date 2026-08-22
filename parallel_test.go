@@ -242,3 +242,161 @@ func TestParallelCountAndForEach(t *testing.T) {
 		t.Errorf("ForEach saw %d, want 50", seen.Load())
 	}
 }
+
+// Where must survive a nil interface element: a plain type assertion on a
+// boxed nil panics, but a nil error in a []error is an ordinary input, not a
+// bug.
+func TestParallelWhereHandlesNilInterfaceElements(t *testing.T) {
+	t.Parallel()
+	got, err := goq.From([]error{nil, errors.New("real"), nil}).
+		AsParallel(goq.Workers(2)).
+		Where(func(error) bool { return true }).
+		ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("got %d elements, want 3", len(got))
+	}
+}
+
+// A panic in a caller-supplied stage upstream of AsParallel runs on the
+// producer goroutine, not the caller's. Without a recover there it would kill
+// the process instead of reaching the caller.
+func TestParallelUpstreamPanicReachesCaller(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("no panic reached the caller — it died on the producer goroutine")
+		}
+		pv, ok := r.(goq.PanicValue)
+		if !ok {
+			t.Fatalf("recovered %T, want goq.PanicValue", r)
+		}
+		if pv.Value != "upstream exploded" {
+			t.Errorf("Value = %v, want \"upstream exploded\"", pv.Value)
+		}
+	}()
+
+	_, _ = goq.From([]int{1, 2, 3}).
+		Select(func(int) int { panic("upstream exploded") }).
+		AsParallel(goq.Workers(2)).
+		Select(func(i int) int { return i }).
+		ToSlice(context.Background())
+	t.Fatal("ToSlice returned instead of panicking")
+}
+
+// A panic from an inner AsParallel pipeline, consumed by an outer one via
+// AsSequential, must surface on the caller's goroutine unwrapped — not
+// double-wrapped in a PanicValue, and not silently swallowed as a truncated
+// success.
+func TestNestedParallelPanicReachesCaller(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("no panic reached the caller from a nested parallel pipeline")
+		}
+		pv, ok := r.(goq.PanicValue)
+		if !ok {
+			t.Fatalf("recovered %T, want goq.PanicValue", r)
+		}
+		// Unwrapped, not double-wrapped.
+		if pv.Value != "inner exploded" {
+			t.Errorf("Value = %v, want \"inner exploded\"", pv.Value)
+		}
+	}()
+
+	_, _ = goq.Range(0, 50).
+		AsParallel(goq.Workers(3)).
+		Select(func(i int) int {
+			if i == 3 {
+				panic("inner exploded")
+			}
+			return i
+		}).
+		AsSequential().
+		AsParallel(goq.Workers(2)).
+		Select(func(i int) int { return i }).
+		ToSlice(context.Background())
+	t.Fatal("ToSlice returned instead of panicking")
+}
+
+// Nested cancellation (as opposed to nested panics, covered above) already
+// works: this locks it in so a future change to the parent/ctx split cannot
+// silently regress it.
+func TestNestedParallelCancellationReachesCaller(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+
+	got, err := goq.Range(0, 500).
+		AsParallel(goq.Workers(4)).
+		SelectCtx(func(_ context.Context, i int) (int, error) {
+			time.Sleep(5 * time.Millisecond)
+			return i, nil
+		}).
+		AsSequential().
+		AsParallel(goq.Workers(2)).
+		Select(func(i int) int { return i }).
+		ToSlice(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want DeadlineExceeded", err)
+	}
+	if got != nil {
+		t.Errorf("got %v on cancellation, want nil", got)
+	}
+}
+
+// The zero-value ParQuery must behave like the zero-value Query and TryQuery:
+// yield nothing, never panic, never deadlock.
+func TestZeroValueParQueryDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	var p goq.ParQuery[int]
+	got, err := p.ToSlice(context.Background())
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+// Invariant 4 (backpressure) rests entirely on the input channel being
+// unbuffered. TestParallelRunsConcurrently bounds in-flight concurrency,
+// which a buffered input channel could also satisfy; this test specifically
+// checks that the producer cannot run ahead of the workers.
+func TestParallelInputChannelIsUnbuffered(t *testing.T) {
+	t.Parallel()
+	var pulls atomic.Int64
+	release := make(chan struct{})
+	src := func(yield func(int) bool) {
+		for i := range 1000 {
+			pulls.Add(1)
+			if !yield(i) {
+				return
+			}
+		}
+	}
+	p := goq.FromSeq(src).AsParallel(goq.Workers(1)).
+		SelectCtx(func(context.Context, int) (int, error) {
+			<-release
+			return 0, nil
+		})
+
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = p.ToSlice(context.Background()) }()
+	time.Sleep(50 * time.Millisecond)
+	got := pulls.Load()
+	close(release)
+	<-done
+
+	// With an unbuffered input and one blocked worker the producer cannot run
+	// ahead: one element is held by the worker and one is pending on the send.
+	// A buffered input would let it drain far more of the source.
+	if got > 10 {
+		t.Errorf("producer pulled %d elements while the only worker was blocked, "+
+			"want <= 10 — the input channel is buffered", got)
+	}
+}
