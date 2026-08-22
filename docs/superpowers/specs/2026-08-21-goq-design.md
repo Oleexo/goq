@@ -21,7 +21,7 @@ necessary now.
 
 - Fluent, chainable, statically typed query composition.
 - Deferred execution; nothing runs until a terminal operator.
-- 51 query operators plus 8 source constructors.
+- 52 query operators plus 8 source constructors.
 - Concurrent sources (channels, ctx cancellation) and a PLINQ-style
   parallel engine.
 - **Zero runtime dependencies.** Consumers of the module resolve nothing
@@ -108,7 +108,7 @@ A method cannot add a constraint to the receiver's own `T`, so bare
 | Type | Carries | Terminal shape |
 |---|---|---|
 | `Query[T]` | `iter.Seq[T]` | `ToSlice() []T`, `First() (T, bool)` |
-| `TryQuery[T]` | `func(ctx) iter.Seq2[T, error]` | `ToSlice(ctx) ([]T, error)` |
+| `TryQuery[T]` | `func(ctx) iter.Seq2[T, error]` | `ToSlice(ctx) ([]T, error)`, `First(ctx) (T, bool, error)` |
 | `ParQuery[T]` | plan + pool options | as `TryQuery` |
 | `OrderedQuery[T]` | source + `[]func(a,b T) int` | satellite; enables `ThenBy` |
 | `GroupQuery[K,T]` | `iter.Seq[Group[K,T]]` | satellite; breaks §2.3 cycle |
@@ -121,8 +121,46 @@ ctx and a concurrent producer, and both are properties of the source and
 the terminal, not of the chain. A separate `AsyncQuery` type would have
 left fallible-sync chains with nowhere to live.
 
-Transitions: `.AsTry()`, `.AsParallel(opts...)`, `.AsSequential()`,
-`.AsQuery()` off each satellite.
+Transitions: `.AsTry()`, `.AsParallel(opts...)`, `.AsSequential()`.
+
+### 3.1.1 The satellite composition law
+
+An operator can be a **method** only if it either preserves the element
+type, or introduces a fresh type parameter for the result element. An
+operator that derives a new element type from the current one can only be
+a method on `Query` itself.
+
+Established empirically; both of these are rejected:
+
+```go
+func (g GroupQuery[K,T]) AsQuery() Query[Group[K,T]]     // instantiation cycle
+func (g GroupQuery[K,T]) OrderBy[K2 cmp.Ordered](...) OrderedQuery[Group[K,T]]  // cycle
+```
+
+`GroupQuery.AsQuery()` cycles because `Query[Group[K,T]]` has `GroupBy`,
+which produces `GroupQuery[K2, Group[K,T]]`, which has `AsQuery()`
+again — without limit. The second fails for the same reason one step
+removed, since `OrderedQuery` itself has `AsQuery()`.
+
+**Therefore:**
+
+- `OrderedQuery[T]` **may** expose `AsQuery() Query[T]` — the element
+  type is unchanged, so nothing recurses.
+- `GroupQuery[K,T]` and `ChunkQuery[T]` **must not**. Their only exits are
+  `Select[R] → Query[R]` (fresh `R`) and non-`Query` terminals such as
+  `ToSlice() []Group[K,T]`.
+- Satellites **do** carry every element-preserving operator: `Where`,
+  `Take`, `Skip`, `Distinct`, `Reverse`, and ordering. Ordering on a
+  satellite returns *the same satellite type* with an accumulated
+  comparator list, never an `OrderedQuery`. Verified:
+  `From(people).GroupBy(dept).OrderBy(size).ThenBy(key).Select(fmt).ToSlice()`
+  compiles and yields `[eng:2 hr:1 ops:1]`.
+- **Derived-on-derived operations are free functions.** `goq.GroupBy(gq,
+  key)` groups an already-grouped query, returning
+  `GroupQuery[K2, Group[K,T]]`. Free functions instantiate per call site
+  rather than as part of a method set, so they do not cycle. Verified
+  working. This is the one place goq is less fluent than C#, which chains
+  `GroupBy` after `GroupBy` as an ordinary method.
 
 ### 3.2 Deferred execution
 
@@ -181,6 +219,12 @@ the `(T, bool)` design.
   `First`, `Last`, `ElementAt`, `Min`, `Max`. C#'s `...OrDefault` twins
   collapse into the discarded bool — `v, _ := q.First()` is
   `FirstOrDefault()`.
+- On `TryQuery` and `ParQuery`, element operators carry both:
+  `First(ctx) (T, bool, error)`. The bool is "found", the error is "the
+  pipeline failed". Three returns is clumsy, but absence and failure are
+  different facts and collapsing them into one error would make the
+  reflexive `if err != nil { return err }` silently treat an empty
+  result as a failure.
 - **`Single` is the one exception**, returning `(T, error)` with
   `goq.ErrEmpty` / `goq.ErrMultiple`. `Single` exists to assert
   uniqueness, and `ErrMultiple` means the caller's data-model assumption
@@ -210,6 +254,7 @@ All comparable with `errors.Is`, all declared in one file:
 | `goq.ErrEmpty` | `Single` on an empty source |
 | `goq.ErrMultiple` | `Single` on a source with more than one element |
 | `goq.ErrConsumed` | second enumeration of a single-shot source (§3.4) |
+| `goq.ErrDuplicateKey` | `ToMap` found two elements with the same key |
 
 Callback errors are returned verbatim, never wrapped, so `errors.Is` and
 `errors.As` work against the caller's own error types.
@@ -235,6 +280,25 @@ a time — over a concurrent source.
   cancel()`, so workers unwind on every exit path including consumer
   `break`.
 
+**Operator scope is deliberately narrow.** `ParQuery` carries only
+element-wise operators — `Select`, `SelectMany`, `Where`, their `...Err`
+and `...Ctx` forms — plus the terminals. Ordering, grouping, set
+operators, and `Reverse` all require materialising the stream, so they are
+not available; reaching them requires an explicit `.AsSequential()`:
+
+```go
+goq.From(urls).AsParallel(goq.Workers(8)).
+    SelectErr(httpGet).
+    AsSequential().        // the barrier is visible, not implied
+    OrderBy(byLatency).
+    ToSlice()
+```
+
+Full PLINQ parity would let one fluent call silently serialise and buffer
+an entire pipeline. Making the barrier a named transition keeps the cost
+where the reader can see it, and keeps the engine small enough to test
+exhaustively.
+
 ### 5.3 Required invariant: post-drain ctx check
 
 **A validated bug, not a hypothetical.** When ctx fires, workers exit via
@@ -256,9 +320,41 @@ Confirmed to change the observed result from `err: <nil>` to
 `err: context deadline exceeded`, with zero leaked goroutines. This needs
 a dedicated regression test (§7.3).
 
+### 5.4 Panic propagation
+
+A panicking user callback on a worker goroutine would otherwise kill the
+process from a goroutine the caller cannot recover, with a stack pointing
+into library internals.
+
+Workers therefore `recover`, forward the value and `debug.Stack()` to the
+terminal, and the terminal re-panics **on the caller's goroutine** after
+cancelling and joining every worker:
+
+```go
+// worker
+defer func() {
+    if r := recover(); r != nil { panicCh <- panicInfo{r, debug.Stack()} }
+}()
+
+// terminal, on the caller's goroutine
+if p := <-panicCh; p != nil {
+    cancel(); wg.Wait()          // no leaks before unwinding
+    panic(wrappedPanic{p.val, p.stack})
+}
+```
+
+A panic stays a panic — it is not reclassified as an `error`, because a
+panic signals a bug and an `error` signals an expected condition.
+`wrappedPanic` must expose the original value so `recover()` in caller
+code can still type-assert it, and print the worker stack alongside the
+caller's.
+
+This applies to `ParQuery` only; sequential pipelines panic naturally on
+the caller's goroutine already.
+
 ## 6. Operator inventory
 
-51 query operators and 8 source constructors. Go-native naming;
+52 query operators and 8 source constructors. Go-native naming;
 `docs/operators.md` carries the C# mapping (`ToArray`/`ToList` → `ToSlice`, `ToDictionary` → `ToMap`,
 `OrderByDescending` → `OrderByDesc`).
 
@@ -274,7 +370,7 @@ a dedicated regression test (§7.3).
 | Aggregation | `Aggregate[A]`, `Count`, `Sum[N]`, `Min`, `MinBy[K]`, `Max`, `MaxBy[K]`, `Average[N]` |
 | Elements | `First`, `Last`, `Single`, `ElementAt` |
 | Quantifiers | `Any`, `All`, `Contains`, `SequenceEqual` |
-| Materialize | `ToSlice`, `ToMap[K]`, `ToSet`, `Memoize` |
+| Materialize | `ToSlice`, `ToMap[K]`, `ToMapLast[K]`, `ToSet`, `Memoize` |
 | Interop | `Seq` |
 | Generators | `From`, `FromSeq`, `FromSeqTry`, `FromMap`, `FromChan`, `Range`, `Repeat`, `Empty` |
 
@@ -286,6 +382,13 @@ Return shapes, to remove any ambiguity:
 - `Average[N]` returns `(float64, bool)` — false on an empty source,
   never a division by zero.
 - `Count` returns `int`; `Sum[N]` returns `N` (zero on empty).
+- `ToMap[K]` returns `(map[K]T, error)`, yielding `ErrDuplicateKey` when
+  two elements share a key — a duplicate means the caller's uniqueness
+  assumption is wrong, the same reasoning as `ErrMultiple` on `Single`.
+  `ToMapLast[K]` returns a plain `map[K]T` with last-wins overwrite, for
+  callers who want that on purpose. `ToMap` is therefore a second
+  fallible terminal on `Query[T]`; like `Single`, its error describes the
+  data, not a pipeline failure.
 - `Seq()` exposes the underlying iterator — `iter.Seq[T]` on `Query`,
   `iter.Seq2[T, error]` on `TryQuery`/`ParQuery` (as `Seq(ctx)`). This is
   the exit back into stdlib iteration (`slices.Collect`, `maps.Insert`,
@@ -300,6 +403,24 @@ that can host a fallible callback (`Select`, `SelectMany`, `Where`,
 `Aggregate`, and the terminals) gain `...Err` and `...Ctx` forms on
 `TryQuery` and `ParQuery`. They are the same operator with a fallible
 callback, not new entries in the inventory.
+
+### 6.1 Streaming vs buffering
+
+Buffering operators must materialise their entire source before yielding
+anything. On a bounded source that is only a memory cost; on an unbounded
+`FromChan` stream they **never yield at all**. This must be stated in each
+operator's godoc, not merely noted here.
+
+| Behaviour | Operators |
+|---|---|
+| Streaming — O(1) extra memory | `Where`, `Select`, `SelectMany`, `Take`, `TakeWhile`, `Skip`, `SkipWhile`, `Zip`, `Concat`, `Chunk`, `Any`, `All`, `Contains`, `First`, `ElementAt`, `Count`, `Sum`, `Aggregate` |
+| Bounded buffer | `TakeLast(n)`, `SkipLast(n)` — retain n elements |
+| Full materialisation | `OrderBy`, `ThenBy`, `Reverse`, `GroupBy`, `ToLookup`, `Distinct`, `DistinctBy`, `Union`, `Intersect`, `Except` and their `...By` forms, `Memoize`, `ToSlice`, `ToMap`, `ToSet` |
+| Materialises the *argument*, streams the receiver | `Intersect`, `Except`, `Union` build a set from the other sequence |
+
+`Last`, `Single`, `Min`, `Max`, and `Average` stream in O(1) memory but
+must reach the end of the source, so they too never return on an
+unbounded stream.
 
 ## 7. Testing
 
@@ -340,6 +461,14 @@ some platforms; add them narrowly, never a blanket ignore.
   same query after `.Memoize()` returns equal results twice.
 - `Seq()` output equals the corresponding `ToSlice()` output for every
   operator, so the two exits cannot diverge.
+- `ToMap` returns `ErrDuplicateKey` on collision; `ToMapLast` overwrites.
+- A panicking callback in a `ParQuery` worker re-panics on the caller's
+  goroutine, the original value survives `recover()`, and no goroutine
+  leaks (§5.4). Verified with `goleak` plus an explicit `recover()` in the
+  test body.
+- Buffering operators (§6.1) are asserted to consume the whole source, and
+  streaming operators asserted *not* to — a `Take(1)` over an infinite
+  generator must terminate.
 
 ### 7.5 Ordered-parallel equivalence
 Fuzz with randomized per-element work durations, asserting
