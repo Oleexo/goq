@@ -152,8 +152,8 @@ func TestParallelWhere(t *testing.T) {
 	}
 }
 
-// TestParallelSelectMany asserts as a MULTISET, because AsOrdered does not
-// exist until Task 18 and unordered mode is the default. Task 18 adds the
+// TestParallelSelectMany asserts as a MULTISET, since unordered mode is the
+// default and does not promise batch order. TestAsOrderedSelectMany adds the
 // order-preserving assertion.
 func TestParallelSelectMany(t *testing.T) {
 	t.Parallel()
@@ -319,6 +319,50 @@ func TestNestedParallelPanicReachesCaller(t *testing.T) {
 		AsSequential().
 		AsParallel(goq.Workers(2)).
 		Select(func(i int) int { return i }).
+		ToSlice(context.Background())
+	t.Fatal("ToSlice returned instead of panicking")
+}
+
+// A panic from an inner AsParallel pipeline whose terminal is invoked
+// directly inside an outer Select callback — as opposed to reached through
+// AsSequential, covered above — runs the inner pipeline's own consumption
+// loop, and thus its re-panic, on the OUTER worker goroutine rather than the
+// outer producer goroutine. This exercises the per-worker recover's
+// PanicValue unwrap specifically, which TestNestedParallelPanicReachesCaller
+// does not: that test's inner pipeline is consumed via AsSequential, so its
+// panic surfaces on the outer producer, exercising only the producer's
+// unwrap.
+func TestNestedParallelPanicInsideSelectReachesCaller(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("no panic reached the caller from a pipeline nested inside a Select callback")
+		}
+		pv, ok := r.(goq.PanicValue)
+		if !ok {
+			t.Fatalf("recovered %T, want goq.PanicValue", r)
+		}
+		// Unwrapped, not double-wrapped.
+		if pv.Value != "inner exploded" {
+			t.Errorf("Value = %v, want \"inner exploded\"", pv.Value)
+		}
+	}()
+
+	_, _ = goq.Range(0, 10).
+		AsParallel(goq.Workers(4)).
+		Select(func(i int) int {
+			_, _ = goq.Range(0, 5).
+				AsParallel(goq.Workers(2)).
+				Select(func(j int) int {
+					if j == 2 {
+						panic("inner exploded")
+					}
+					return j
+				}).
+				ToSlice(context.Background())
+			return i
+		}).
 		ToSlice(context.Background())
 	t.Fatal("ToSlice returned instead of panicking")
 }

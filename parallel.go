@@ -92,10 +92,16 @@ func (p ParQuery[T]) AsSequential() TryQuery[T] { return p.resolve() }
 // AsOrdered makes results arrive in source order rather than completion order.
 //
 // The engine tags each element with its source position and reassembles the
-// sequence in a sink buffer holding at most Window results. Ordering costs
-// latency and memory: one slow element delays every later one, and up to
-// Window results are retained meanwhile. Unordered is the default because it
-// is strictly faster.
+// sequence in a sink buffer holding at most Window-1 out-of-order results.
+// Ordering costs latency and memory: one slow element delays every later one,
+// and up to Window-1 results are retained meanwhile. Unordered is the default
+// because it is strictly faster.
+//
+// Window also caps how many items may be in flight at once — the engine will
+// not compute an item more than Window positions ahead of the next one still
+// awaited — so effective parallelism becomes min(Workers, Window). The
+// default Window (four times Workers) never throttles; an explicitly small
+// Window does, down to full serialisation at Window(1).
 //
 // Because the option is applied when the pipeline is built, AsOrdered may be
 // written after the operators whose output it orders.
@@ -272,10 +278,12 @@ func parMap[T, R any](
 
 				// opts.window is normally >= 1 (newParOptions enforces it),
 				// but a zero-value ParQuery carries a zero-value parOptions
-				// with window == 0. Left unclamped, the ordered branch's
-				// defensive overflow check (len(pending) > window) would fire
-				// on the very first held result, reporting a spurious
-				// internal error instead of behaving like an unbuffered sink.
+				// with window == 0. This clamp is load-bearing for liveness,
+				// not just correctness: a zero-capacity admit channel (below)
+				// would make the producer's first admit send block forever
+				// (0 < 0+0 is never true), so in would never close, workers
+				// would never exit, out would never close, and the consumer
+				// would hang on `range out` indefinitely.
 				window := opts.window
 				if window < 1 {
 					window = 1
@@ -285,50 +293,30 @@ func parMap[T, R any](
 				out := make(chan parResult[R], workers)
 				panics := make(chan panicInfo, workers+1) // +1: producer can also panic
 
-				// The admission gate is what actually bounds the ordered
-				// sink's memory. Without it, a single pathologically slow
-				// element would not stop the producer from feeding workers
-				// further and further ahead: out is drained continuously by
-				// the consumer (see the ordered branch below), so its fixed
-				// capacity never backpressures the producer on its own, and
-				// the reorder sink's pending map would grow without limit —
-				// exactly the failure mode Window exists to prevent.
+				// admit is a token pool bounding how many items the producer
+				// may have dispatched but the ordered sink has not yet
+				// emitted: outstanding tokens = dispatched - emitted < window,
+				// which is exactly the bound Window promises. Without it, a
+				// single pathologically slow element would not stop the
+				// producer from feeding workers further and further ahead —
+				// out is drained continuously by the consumer (see the
+				// ordered branch below), so its fixed capacity never
+				// backpressures the producer on its own, and the reorder
+				// sink's pending map would grow without limit.
 				//
-				// admitWait blocks the producer from dispatching item idx
-				// until idx < admitNext+window; admitRelease advances
-				// admitNext (and wakes every blocked waiter) each time the
-				// ordered consumer emits the next expected result, which it
-				// does at the same point it advances its own next, so the two
-				// stay in lockstep. Gating happens on dispatch, before a
-				// worker ever sees the item, which is why the pool loop below
-				// needs no changes. Neither function is called when
-				// !opts.ordered, so unordered mode is unaffected.
-				var admitMu sync.Mutex
-				admitNext := 0
-				admitCh := make(chan struct{})
-				admitWait := func(ctx context.Context, idx int) bool {
-					for {
-						admitMu.Lock()
-						ok := idx < admitNext+window
-						ch := admitCh
-						admitMu.Unlock()
-						if ok {
-							return true
-						}
-						select {
-						case <-ch:
-						case <-ctx.Done():
-							return false
-						}
-					}
-				}
-				admitRelease := func() {
-					admitMu.Lock()
-					admitNext++
-					close(admitCh)
-					admitCh = make(chan struct{})
-					admitMu.Unlock()
-				}
+				// The producer acquires a token (send, blocking, cancellable
+				// via ctx) before dispatching item i into in; the ordered
+				// sink releases one (receive, immediately after advancing
+				// next past the item it just emitted). The sink's receive can
+				// never block: it is releasing the token for an item that was
+				// necessarily admitted — and therefore already holds a token
+				// — before it could ever have been computed and delivered
+				// here, so no ctx case is needed on that side. Gating happens
+				// on dispatch, before a worker ever sees the item, which is
+				// why the pool loop below needs no changes. admit is never
+				// touched when !opts.ordered, so unordered mode is
+				// unaffected.
+				admit := make(chan struct{}, window)
 
 				var producer sync.WaitGroup
 				producer.Add(1)
@@ -360,8 +348,12 @@ func parMap[T, R any](
 					}()
 					i := 0
 					for v, err := range planOf(src)(ctx) {
-						if opts.ordered && !admitWait(ctx, i) {
-							return // cancelled while waiting for admission
+						if opts.ordered {
+							select {
+							case admit <- struct{}{}:
+							case <-ctx.Done():
+								return // cancelled while waiting for admission
+							}
 						}
 						select {
 						case in <- parResult[T]{idx: i, val: v, err: err}:
@@ -474,7 +466,7 @@ func parMap[T, R any](
 							}
 							delete(pending, next)
 							next++
-							admitRelease() // let the producer dispatch one more
+							<-admit // release a token: let the producer dispatch one more
 							if item.err != nil {
 								var zero R
 								yield(zero, item.err)

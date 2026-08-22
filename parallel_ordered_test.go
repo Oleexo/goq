@@ -38,13 +38,13 @@ func TestAsOrderedPreservesSourceOrder(t *testing.T) {
 func TestAsOrderedEqualsSequential(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	sequential, err := goq.Range(0, 50).AsTry().
+		Select(func(i int) int { return i * 3 }).ToSlice(ctx)
+	if err != nil {
+		t.Fatalf("sequential err = %v", err)
+	}
 	for _, workers := range []int{1, 2, 3, 8, 16} {
 		for _, window := range []int{1, 2, 7, 64} {
-			sequential, err := goq.Range(0, 50).AsTry().
-				Select(func(i int) int { return i * 3 }).ToSlice(ctx)
-			if err != nil {
-				t.Fatalf("sequential err = %v", err)
-			}
 			parallel, err := goq.Range(0, 50).
 				AsParallel(goq.Workers(workers), goq.Window(window)).
 				SelectCtx(func(_ context.Context, i int) (int, error) {
@@ -128,6 +128,63 @@ func TestAsOrderedCancellationIsReported(t *testing.T) {
 		ToSlice(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want DeadlineExceeded", err)
+	}
+}
+
+// Where must inherit order for free: it wraps parMap's already-reassembled
+// output, so it needs no ordering logic of its own.
+func TestAsOrderedWhere(t *testing.T) {
+	t.Parallel()
+	got, err := goq.Range(0, 30).
+		AsParallel(goq.Workers(6), goq.Window(4)).
+		SelectCtx(func(_ context.Context, i int) (int, error) {
+			time.Sleep(time.Duration((17*i)%7) * time.Millisecond)
+			return i, nil
+		}).
+		Where(func(i int) bool { return i%2 == 0 }).
+		AsOrdered().
+		ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	want := make([]int, 0, 15)
+	for i := 0; i < 30; i += 2 {
+		want = append(want, i)
+	}
+	if d := cmp.Diff(want, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+}
+
+// Two ordered stages chained through the AsSequential barrier must each
+// renumber their own indices independently, starting a fresh producer and
+// admission gate rather than sharing state with the earlier stage.
+func TestAsOrderedChainedStages(t *testing.T) {
+	t.Parallel()
+	got, err := goq.Range(0, 40).
+		AsParallel(goq.Workers(4), goq.Window(6)).
+		SelectCtx(func(_ context.Context, i int) (int, error) {
+			time.Sleep(time.Duration((23*i)%9) * time.Millisecond)
+			return i, nil
+		}).
+		AsOrdered().
+		AsSequential().
+		AsParallel(goq.Workers(3), goq.Window(2)).
+		SelectCtx(func(_ context.Context, i int) (int, error) {
+			time.Sleep(time.Duration((11*i)%5) * time.Millisecond)
+			return i * 2, nil
+		}).
+		AsOrdered().
+		ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	want := make([]int, 0, 40)
+	for i := range 40 {
+		want = append(want, i*2)
+	}
+	if d := cmp.Diff(want, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
 	}
 }
 

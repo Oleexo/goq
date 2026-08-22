@@ -29,6 +29,13 @@ func Workers(n int) Option {
 // it stops accepting more. It bounds memory when one element is far slower than
 // its neighbours. Values below one are ignored. The default is four times the
 // worker count. It has no effect unless AsOrdered is used.
+//
+// In ordered mode, Window also caps how many items may be in flight at once —
+// the producer will not dispatch an item more than Window positions ahead of
+// the next one the sink is waiting to emit — so effective parallelism becomes
+// min(Workers, Window). The default (four times Workers) exceeds Workers, so
+// it never throttles; only an explicitly small Window (e.g. Window(1)) serialises
+// the pipeline.
 func Window(n int) Option {
 	return func(o *parOptions) {
 		if n >= 1 {
