@@ -144,6 +144,11 @@ func (q TryQuery[T]) Count(ctx context.Context) (int, error) {
 // Enumerating the result consumes the underlying source, so a single-shot
 // source's original handle will report ErrConsumed afterwards even if it was
 // never enumerated directly — there is only one source, and it has been read.
+//
+// If the source panics during the first enumeration, the panic propagates to
+// that caller, but the cache is left empty and considered populated: every
+// later enumeration of this TryQuery then yields nothing rather than
+// retrying, exactly as Query.Memoize does.
 func (q TryQuery[T]) Memoize() TryQuery[T] {
 	var (
 		once   sync.Once

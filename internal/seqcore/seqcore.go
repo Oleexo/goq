@@ -1,5 +1,6 @@
-// Package seqcore holds goq's operator logic as free functions over iter.Seq
-// and iter.Seq2.
+// Package seqcore holds goq's infallible operator logic as free functions
+// over iter.Seq. The fallible pipeline (TryQuery) builds its own iter.Seq2
+// stages rather than sharing this package.
 //
 // It exists so that each operator is implemented once and shared by every
 // pipeline type. It is internal: nothing here is part of goq's public API.
@@ -97,28 +98,47 @@ func SkipWhile[T any](s iter.Seq[T], pred func(T) bool) iter.Seq[T] {
 
 // TakeLast yields the final n elements of s. It reads s to the end but retains
 // at most n elements, so it never returns on an unbounded source.
+//
+// The n most recent elements are tracked in a fixed-size ring buffer, so each
+// incoming element costs O(1) rather than shifting the whole buffer: filling
+// and draining the buffer is O(n) total, not O(n) per element.
 func TakeLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 	return func(yield func(T) bool) {
 		if n <= 0 {
 			return
 		}
-		buf := make([]T, 0, n)
+		buf := make([]T, n)
+		count := 0 // number of elements written, capped at n
+		next := 0  // ring index the next element will be written to
 		for v := range s {
-			if len(buf) == n {
-				buf = append(buf[:0], buf[1:]...)
+			buf[next] = v
+			next = (next + 1) % n
+			if count < n {
+				count++
 			}
-			buf = append(buf, v)
 		}
-		for _, v := range buf {
-			if !yield(v) {
+		// count < n: the buffer never wrapped, so the oldest retained element
+		// is buf[0]. count == n: it wrapped at least once, so the oldest
+		// retained element is the one about to be overwritten next, at
+		// buf[next].
+		start := 0
+		if count == n {
+			start = next
+		}
+		for i := range count {
+			if !yield(buf[(start+i)%n]) {
 				return
 			}
 		}
 	}
 }
 
-// SkipLast yields every element of s except the final n. It retains at most n+1
+// SkipLast yields every element of s except the final n. It retains at most n
 // elements at a time.
+//
+// It is a delay line implemented as a fixed-size ring buffer: each incoming
+// element costs O(1) — one slot read (if the buffer is already full) followed
+// by one slot write — rather than shifting the whole buffer.
 func SkipLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 	return func(yield func(T) bool) {
 		if n <= 0 {
@@ -129,15 +149,20 @@ func SkipLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 			}
 			return
 		}
-		buf := make([]T, 0, n+1)
+		buf := make([]T, n)
+		count := 0 // number of elements written so far
+		idx := 0   // ring index the next element will be written to
 		for v := range s {
-			buf = append(buf, v)
-			if len(buf) > n {
-				if !yield(buf[0]) {
+			if count >= n {
+				// The buffer is full: the slot about to be overwritten holds
+				// the element from n steps ago, which is now safe to yield.
+				if !yield(buf[idx]) {
 					return
 				}
-				buf = append(buf[:0], buf[1:]...)
 			}
+			buf[idx] = v
+			idx = (idx + 1) % n
+			count++
 		}
 	}
 }

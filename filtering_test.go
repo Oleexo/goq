@@ -1,6 +1,7 @@
 package goq_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -13,30 +14,30 @@ func TestFilteringOperators(t *testing.T) {
 	src := []int{1, 2, 3, 4, 5, 6}
 	tests := []struct {
 		name string
-		got  []int
+		got  func() []int
 		want []int
 	}{
-		{"Where even", goq.From(src).Where(func(i int) bool { return i%2 == 0 }).ToSlice(), []int{2, 4, 6}},
-		{"Where none", goq.From(src).Where(func(int) bool { return false }).ToSlice(), []int{}},
-		{"Take 2", goq.From(src).Take(2).ToSlice(), []int{1, 2}},
-		{"Take 0", goq.From(src).Take(0).ToSlice(), []int{}},
-		{"Take negative", goq.From(src).Take(-1).ToSlice(), []int{}},
-		{"Take past end", goq.From(src).Take(99).ToSlice(), src},
-		{"TakeWhile", goq.From(src).TakeWhile(func(i int) bool { return i < 4 }).ToSlice(), []int{1, 2, 3}},
-		{"TakeLast 2", goq.From(src).TakeLast(2).ToSlice(), []int{5, 6}},
-		{"TakeLast past end", goq.From(src).TakeLast(99).ToSlice(), src},
-		{"Skip 4", goq.From(src).Skip(4).ToSlice(), []int{5, 6}},
-		{"Skip past end", goq.From(src).Skip(99).ToSlice(), []int{}},
-		{"SkipWhile", goq.From(src).SkipWhile(func(i int) bool { return i < 4 }).ToSlice(), []int{4, 5, 6}},
-		{"SkipLast 2", goq.From(src).SkipLast(2).ToSlice(), []int{1, 2, 3, 4}},
-		{"SkipLast past end", goq.From(src).SkipLast(99).ToSlice(), []int{}},
-		{"empty source", goq.Empty[int]().Where(func(int) bool { return true }).ToSlice(), []int{}},
-		{"chained", goq.From(src).Where(func(i int) bool { return i > 2 }).Take(2).ToSlice(), []int{3, 4}},
+		{"Where even", func() []int { return goq.From(src).Where(func(i int) bool { return i%2 == 0 }).ToSlice() }, []int{2, 4, 6}},
+		{"Where none", func() []int { return goq.From(src).Where(func(int) bool { return false }).ToSlice() }, []int{}},
+		{"Take 2", func() []int { return goq.From(src).Take(2).ToSlice() }, []int{1, 2}},
+		{"Take 0", func() []int { return goq.From(src).Take(0).ToSlice() }, []int{}},
+		{"Take negative", func() []int { return goq.From(src).Take(-1).ToSlice() }, []int{}},
+		{"Take past end", func() []int { return goq.From(src).Take(99).ToSlice() }, src},
+		{"TakeWhile", func() []int { return goq.From(src).TakeWhile(func(i int) bool { return i < 4 }).ToSlice() }, []int{1, 2, 3}},
+		{"TakeLast 2", func() []int { return goq.From(src).TakeLast(2).ToSlice() }, []int{5, 6}},
+		{"TakeLast past end", func() []int { return goq.From(src).TakeLast(99).ToSlice() }, src},
+		{"Skip 4", func() []int { return goq.From(src).Skip(4).ToSlice() }, []int{5, 6}},
+		{"Skip past end", func() []int { return goq.From(src).Skip(99).ToSlice() }, []int{}},
+		{"SkipWhile", func() []int { return goq.From(src).SkipWhile(func(i int) bool { return i < 4 }).ToSlice() }, []int{4, 5, 6}},
+		{"SkipLast 2", func() []int { return goq.From(src).SkipLast(2).ToSlice() }, []int{1, 2, 3, 4}},
+		{"SkipLast past end", func() []int { return goq.From(src).SkipLast(99).ToSlice() }, []int{}},
+		{"empty source", func() []int { return goq.Empty[int]().Where(func(int) bool { return true }).ToSlice() }, []int{}},
+		{"chained", func() []int { return goq.From(src).Where(func(i int) bool { return i > 2 }).Take(2).ToSlice() }, []int{3, 4}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if d := cmp.Diff(tc.want, tc.got); d != "" {
+			if d := cmp.Diff(tc.want, tc.got()); d != "" {
 				t.Errorf("mismatch (-want +got):\n%s", d)
 			}
 		})
@@ -117,5 +118,44 @@ func TestTakeLastAndSkipLastAreMemoryBounded(t *testing.T) {
 				"the operator is buffering the whole source instead of a bounded window",
 				tc.name, got, sourceLen, maxBytesOp)
 		}
+	}
+}
+
+// TakeLast and SkipLast are implemented as fixed-size ring buffers rather
+// than a shift-per-element buffer, to avoid an O(n) copy on every incoming
+// element once the buffer is full. This locks in the ring's wraparound
+// arithmetic — the part most likely to be wrong in that implementation —
+// across n both smaller and larger than the source, and across multiple
+// wraps of the buffer.
+func TestTakeLastAndSkipLastRingBufferWraparound(t *testing.T) {
+	t.Parallel()
+	const sourceLen = 1000
+	src := make([]int, sourceLen)
+	for i := range src {
+		src[i] = i
+	}
+	for _, n := range []int{1, 2, 3, 7, 999, 1000, 1001, 2500} {
+		t.Run(fmt.Sprintf("TakeLast n=%d", n), func(t *testing.T) {
+			t.Parallel()
+			want := src
+			if n < len(src) {
+				want = src[len(src)-n:]
+			}
+			got := goq.From(src).TakeLast(n).ToSlice()
+			if d := cmp.Diff(want, got); d != "" {
+				t.Errorf("mismatch (-want +got):\n%s", d)
+			}
+		})
+		t.Run(fmt.Sprintf("SkipLast n=%d", n), func(t *testing.T) {
+			t.Parallel()
+			want := []int{}
+			if n < len(src) {
+				want = src[:len(src)-n]
+			}
+			got := goq.From(src).SkipLast(n).ToSlice()
+			if d := cmp.Diff(want, got); d != "" {
+				t.Errorf("mismatch (-want +got):\n%s", d)
+			}
+		})
 	}
 }

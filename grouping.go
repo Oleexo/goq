@@ -26,9 +26,21 @@ type Group[K comparable, V any] struct {
 //
 // Grouping is a buffering operation: the source is fully consumed before the
 // first group is yielded.
+//
+// The zero GroupQuery yields no groups.
 type GroupQuery[K comparable, T any] struct {
 	src  iter.Seq[Group[K, T]]
 	cmps []func(a, b Group[K, T]) int
+}
+
+// srcSeq returns g's source, treating a nil source — as found in the zero
+// GroupQuery — as an empty sequence rather than a nil iter.Seq, which would
+// panic when ranged over.
+func (g GroupQuery[K, T]) srcSeq() iter.Seq[Group[K, T]] {
+	if g.src == nil {
+		return func(func(Group[K, T]) bool) {}
+	}
+	return g.src
 }
 
 // GroupBy groups the elements by key. Groups are yielded in order of first
@@ -56,6 +68,9 @@ func (q Query[T]) GroupBySelect[K comparable, R any](
 
 // ToLookup indexes every element by key, keeping all elements per key. Unlike
 // ToMap it cannot fail, because duplicate keys are the point.
+//
+// It fully materialises the source into the returned map, so it never returns
+// on an unbounded source.
 func (q Query[T]) ToLookup[K comparable](key func(T) K) map[K][]T {
 	out := make(map[K][]T)
 	for v := range q.Seq() {
@@ -67,7 +82,7 @@ func (q Query[T]) ToLookup[K comparable](key func(T) K) map[K][]T {
 
 // Where yields the groups for which pred returns true.
 func (g GroupQuery[K, T]) Where(pred func(Group[K, T]) bool) GroupQuery[K, T] {
-	src := g.src
+	src := g.srcSeq()
 	return GroupQuery[K, T]{cmps: g.cmps, src: func(yield func(Group[K, T]) bool) {
 		for v := range src {
 			if pred(v) && !yield(v) {
@@ -80,6 +95,11 @@ func (g GroupQuery[K, T]) Where(pred func(Group[K, T]) bool) GroupQuery[K, T] {
 // OrderBy sorts the groups ascending by key. It returns a GroupQuery rather
 // than an OrderedQuery: the latter would reintroduce the instantiation cycle
 // GroupQuery exists to avoid. Chain ThenBy for tie-breakers.
+//
+// OrderBy resets any comparators accumulated by earlier ThenBy/ThenByDesc
+// calls rather than appending to them — "sort by this instead," matching
+// Query.OrderBy. A later OrderBy call does not become a tie-breaker for an
+// earlier one; call ThenBy for that.
 func (g GroupQuery[K, T]) OrderBy[K2 cmp.Ordered](key func(Group[K, T]) K2) GroupQuery[K, T] {
 	return GroupQuery[K, T]{src: g.src, cmps: []func(a, b Group[K, T]) int{ascending(key)}}
 }
@@ -90,6 +110,13 @@ func (g GroupQuery[K, T]) OrderByDesc[K2 cmp.Ordered](key func(Group[K, T]) K2) 
 }
 
 // ThenBy adds an ascending tie-breaking key for the group ordering.
+//
+// Unlike Query, where ThenBy exists only on OrderedQuery and so is
+// unreachable without a preceding OrderBy, GroupQuery has no separate ordered
+// type: ThenBy is a plain method here, so From(xs).GroupBy(k).ThenBy(f)
+// compiles even with no preceding OrderBy. Called with no preceding OrderBy,
+// ThenBy silently behaves as OrderBy: there are no earlier comparators for it
+// to break ties on.
 func (g GroupQuery[K, T]) ThenBy[K2 cmp.Ordered](key func(Group[K, T]) K2) GroupQuery[K, T] {
 	return GroupQuery[K, T]{src: g.src, cmps: appendCmp(g.cmps, ascending(key))}
 }
@@ -100,12 +127,15 @@ func (g GroupQuery[K, T]) ThenByDesc[K2 cmp.Ordered](key func(Group[K, T]) K2) G
 }
 
 // Seq returns the groups as an iterator, applying any pending ordering.
+//
+// The zero GroupQuery has a nil source and yields no groups, matching
+// Query's zero value.
 func (g GroupQuery[K, T]) Seq() iter.Seq[Group[K, T]] {
 	if len(g.cmps) == 0 {
-		return g.src
+		return g.srcSeq()
 	}
 	return func(yield func(Group[K, T]) bool) {
-		buf := slices.Collect(g.src)
+		buf := slices.Collect(g.srcSeq())
 		slices.SortStableFunc(buf, func(a, b Group[K, T]) int {
 			for _, c := range g.cmps {
 				if r := c(a, b); r != 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -256,8 +257,53 @@ func TestParallelWhereHandlesNilInterfaceElements(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(got) != 3 {
-		t.Errorf("got %d elements, want 3", len(got))
+		t.Fatalf("got %d elements, want 3", len(got))
 	}
+	// This test exists specifically to protect the comma-ok unbox in Where's
+	// k.val.(T) — asserting only the count would pass even if that unbox
+	// silently produced some non-nil zero value instead of a true nil error.
+	var nils int
+	for _, e := range got {
+		if e == nil {
+			nils++
+			continue
+		}
+		if e.Error() != "real" {
+			t.Errorf("non-nil element = %q, want %q", e.Error(), "real")
+		}
+	}
+	if nils != 2 {
+		t.Errorf("got %d nil elements, want 2 (the comma-ok unbox may not be "+
+			"producing a true nil)", nils)
+	}
+}
+
+// PanicValue.String is what the Go runtime prints for an unrecovered
+// panic(PanicValue{...}) — it is the parallel engine's primary diagnostic
+// surface, and nothing else exercises it. It must contain both the original
+// panic value and (some of) the captured stack.
+func TestPanicValueString(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		pv, ok := r.(goq.PanicValue)
+		if !ok {
+			t.Fatalf("recovered %T, want goq.PanicValue", r)
+		}
+		s := pv.String()
+		if !strings.Contains(s, "diagnostic marker 42") {
+			t.Errorf("String() = %q, does not contain the original panic value", s)
+		}
+		if !strings.Contains(s, "goroutine") {
+			t.Errorf("String() = %q, does not contain a stack trace", s)
+		}
+	}()
+
+	_, _ = goq.From([]int{1}).
+		AsParallel(goq.Workers(1)).
+		Select(func(int) int { panic("diagnostic marker 42") }).
+		ToSlice(context.Background())
+	t.Fatal("ToSlice returned instead of panicking")
 }
 
 // A panic in a caller-supplied stage upstream of AsParallel runs on the
@@ -438,9 +484,10 @@ func TestParallelInputChannelIsUnbuffered(t *testing.T) {
 
 	// With an unbuffered input and one blocked worker the producer cannot run
 	// ahead: one element is held by the worker and one is pending on the send.
-	// A buffered input would let it drain far more of the source.
-	if got > 10 {
+	// The exact count is 2, not merely "small" — a threshold like <= 10 would
+	// still pass with an input buffer of 4-9, silently missing that bug.
+	if got != 2 {
 		t.Errorf("producer pulled %d elements while the only worker was blocked, "+
-			"want <= 10 — the input channel is buffered", got)
+			"want exactly 2 — the input channel is buffered", got)
 	}
 }

@@ -140,3 +140,29 @@ func TestOrderByConsumesWholeSourceBeforeYielding(t *testing.T) {
 		t.Errorf("pulled %d before first element, want 10 (ordering must buffer)", pulled)
 	}
 }
+
+// The zero OrderedQuery must behave as empty across every operator and
+// terminal, not merely the first one anyone happens to call.
+func TestZeroValueOrderedQueryOperatorsDoNotPanic(t *testing.T) {
+	t.Parallel()
+	var o goq.OrderedQuery[int]
+
+	for range o.Seq() {
+		t.Error("Seq yielded an element from the zero value")
+	}
+	if got := o.ToSlice(); len(got) != 0 {
+		t.Errorf("ToSlice = %v, want empty", got)
+	}
+	if got := o.AsQuery().ToSlice(); len(got) != 0 {
+		t.Errorf("AsQuery.ToSlice = %v, want empty", got)
+	}
+	if got := o.ThenBy(func(i int) int { return i }).ToSlice(); len(got) != 0 {
+		t.Errorf("ThenBy.ToSlice = %v, want empty", got)
+	}
+	if got := o.ThenByDesc(func(i int) int { return i }).ToSlice(); len(got) != 0 {
+		t.Errorf("ThenByDesc.ToSlice = %v, want empty", got)
+	}
+	if got := o.Select(func(i int) int { return i * 2 }).ToSlice(); len(got) != 0 {
+		t.Errorf("Select.ToSlice = %v, want empty", got)
+	}
+}

@@ -22,22 +22,24 @@ func TestSetOperators(t *testing.T) {
 	b := goq.From([]int{3, 4})
 	tests := []struct {
 		name string
-		got  []int
+		got  func() []int
 		want []int
 	}{
-		{"Distinct", goq.Distinct(a).ToSlice(), []int{1, 2, 3}},
-		{"Union", goq.Union(a, b).ToSlice(), []int{1, 2, 3, 4}},
-		{"Intersect", goq.Intersect(a, b).ToSlice(), []int{3}},
-		{"Intersect dedupes receiver", goq.Intersect(goq.From([]int{1, 2, 2, 3}), goq.From([]int{2})).ToSlice(), []int{2}},
-		{"Except", goq.Except(a, b).ToSlice(), []int{1, 2}},
-		{"Intersect empty", goq.Intersect(a, goq.Empty[int]()).ToSlice(), []int{}},
-		{"Except empty", goq.Except(a, goq.Empty[int]()).ToSlice(), []int{1, 2, 3}},
-		{"Except everything", goq.Except(a, a).ToSlice(), []int{}},
+		{"Distinct", func() []int { return goq.Distinct(a).ToSlice() }, []int{1, 2, 3}},
+		{"Union", func() []int { return goq.Union(a, b).ToSlice() }, []int{1, 2, 3, 4}},
+		{"Intersect", func() []int { return goq.Intersect(a, b).ToSlice() }, []int{3}},
+		{"Intersect dedupes receiver", func() []int {
+			return goq.Intersect(goq.From([]int{1, 2, 2, 3}), goq.From([]int{2})).ToSlice()
+		}, []int{2}},
+		{"Except", func() []int { return goq.Except(a, b).ToSlice() }, []int{1, 2}},
+		{"Intersect empty", func() []int { return goq.Intersect(a, goq.Empty[int]()).ToSlice() }, []int{}},
+		{"Except empty", func() []int { return goq.Except(a, goq.Empty[int]()).ToSlice() }, []int{1, 2, 3}},
+		{"Except everything", func() []int { return goq.Except(a, a).ToSlice() }, []int{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if d := cmp.Diff(tc.want, tc.got); d != "" {
+			if d := cmp.Diff(tc.want, tc.got()); d != "" {
 				t.Errorf("mismatch (-want +got):\n%s", d)
 			}
 		})

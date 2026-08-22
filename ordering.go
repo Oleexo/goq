@@ -13,6 +13,8 @@ import (
 // Ordering is a buffering operation. The source is fully consumed and sorted
 // when the pipeline is first enumerated, so an OrderedQuery over an unbounded
 // source never yields.
+//
+// The zero OrderedQuery yields no elements.
 type OrderedQuery[T any] struct {
 	src  iter.Seq[T]
 	cmps []func(a, b T) int
@@ -62,9 +64,16 @@ func (o OrderedQuery[T]) ThenByDesc[K cmp.Ordered](key func(T) K) OrderedQuery[T
 // Seq returns the sorted pipeline as an iterator. Each call to Seq re-collects
 // and re-sorts the source, so enumerate only once or use Memoize if the result
 // must be reused.
+//
+// The zero OrderedQuery has a nil source and yields no elements, matching
+// Query's zero value.
 func (o OrderedQuery[T]) Seq() iter.Seq[T] {
 	return func(yield func(T) bool) {
-		buf := slices.Collect(o.src)
+		src := o.src
+		if src == nil {
+			src = func(func(T) bool) {}
+		}
+		buf := slices.Collect(src)
 		slices.SortStableFunc(buf, o.compare)
 		for _, v := range buf {
 			if !yield(v) {

@@ -15,6 +15,8 @@ import (
 // Chunking is a streaming operation: each batch is yielded as soon as it
 // fills, so a ChunkQuery over an unbounded source yields batches indefinitely
 // rather than never yielding at all — unlike GroupQuery, which must buffer.
+//
+// The zero ChunkQuery yields no batches.
 type ChunkQuery[T any] struct {
 	src iter.Seq[[]T]
 }
@@ -49,7 +51,7 @@ func (q Query[T]) Chunk(size int) ChunkQuery[T] {
 
 // Where yields the batches for which pred returns true.
 func (c ChunkQuery[T]) Where(pred func([]T) bool) ChunkQuery[T] {
-	src := c.src
+	src := c.Seq()
 	return ChunkQuery[T]{src: func(yield func([]T) bool) {
 		for batch := range src {
 			if pred(batch) && !yield(batch) {
@@ -63,7 +65,7 @@ func (c ChunkQuery[T]) Where(pred func([]T) bool) ChunkQuery[T] {
 // the full operator set.
 func (c ChunkQuery[T]) Select[R any](f func([]T) R) Query[R] {
 	return Query[R]{seq: func(yield func(R) bool) {
-		for batch := range c.src {
+		for batch := range c.Seq() {
 			if !yield(f(batch)) {
 				return
 			}
@@ -72,11 +74,19 @@ func (c ChunkQuery[T]) Select[R any](f func([]T) R) Query[R] {
 }
 
 // Seq returns the batches as an iterator.
-func (c ChunkQuery[T]) Seq() iter.Seq[[]T] { return c.src }
+//
+// The zero ChunkQuery has a nil source and yields no batches, matching
+// Query's zero value.
+func (c ChunkQuery[T]) Seq() iter.Seq[[]T] {
+	if c.src == nil {
+		return func(func([]T) bool) {}
+	}
+	return c.src
+}
 
 // ToSlice materialises the batches into a new slice of slices.
 func (c ChunkQuery[T]) ToSlice() [][]T {
-	out := slices.Collect(c.src)
+	out := slices.Collect(c.Seq())
 	if out == nil {
 		out = [][]T{}
 	}
@@ -86,7 +96,7 @@ func (c ChunkQuery[T]) ToSlice() [][]T {
 // Count reports the number of batches.
 func (c ChunkQuery[T]) Count() int {
 	n := 0
-	for range c.src {
+	for range c.Seq() {
 		n++
 	}
 	return n

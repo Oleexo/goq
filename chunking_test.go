@@ -81,3 +81,37 @@ func TestChunkBatchesDoNotAlias(t *testing.T) {
 		t.Errorf("mismatch (-want +got):\n%s", d)
 	}
 }
+
+// Count reports the number of batches, not the number of elements.
+func TestChunkCount(t *testing.T) {
+	t.Parallel()
+	if n := goq.Range(1, 5).Chunk(2).Count(); n != 3 {
+		t.Errorf("Count = %d, want 3", n)
+	}
+	if n := goq.Empty[int]().Chunk(2).Count(); n != 0 {
+		t.Errorf("Count on empty source = %d, want 0", n)
+	}
+}
+
+// The zero ChunkQuery must behave as empty across every operator and
+// terminal, not merely the first one anyone happens to call.
+func TestZeroValueChunkQueryOperatorsDoNotPanic(t *testing.T) {
+	t.Parallel()
+	var c goq.ChunkQuery[int]
+
+	for range c.Seq() {
+		t.Error("Seq yielded a batch from the zero value")
+	}
+	if got := c.ToSlice(); len(got) != 0 {
+		t.Errorf("ToSlice = %v, want empty", got)
+	}
+	if n := c.Count(); n != 0 {
+		t.Errorf("Count = %d, want 0", n)
+	}
+	if got := c.Where(func([]int) bool { return true }).ToSlice(); len(got) != 0 {
+		t.Errorf("Where.ToSlice = %v, want empty", got)
+	}
+	if got := c.Select(func(b []int) int { return len(b) }).ToSlice(); len(got) != 0 {
+		t.Errorf("Select.ToSlice = %v, want empty", got)
+	}
+}

@@ -27,6 +27,9 @@ func (q Query[T]) ToMap[K comparable](key func(T) K) (map[K]T, error) {
 
 // ToMapLast indexes the elements by key, with later elements overwriting
 // earlier ones on collision. Use ToMap to detect collisions instead.
+//
+// It fully materialises the source into the returned map, so it never returns
+// on an unbounded source.
 func (q Query[T]) ToMapLast[K comparable](key func(T) K) map[K]T {
 	out := make(map[K]T)
 	for v := range q.Seq() {
@@ -62,6 +65,9 @@ func (q Query[T]) Memoize() Query[T] {
 }
 
 // ToSet collects the distinct elements into a set.
+//
+// It fully materialises the source into the returned map, so it never returns
+// on an unbounded source.
 //
 // It is a function rather than a method because a method cannot require that
 // Query's element type be comparable.

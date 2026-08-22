@@ -55,6 +55,10 @@ func (q Query[T]) Single() (T, error) {
 
 // ElementAt returns the element at the given zero-based index and true, or the
 // zero value and false if the index is negative or beyond the end.
+//
+// It streams: it pulls only as far as index i, so it works on an unbounded
+// source as long as i is reached. A negative i returns immediately without
+// pulling anything.
 func (q Query[T]) ElementAt(i int) (T, bool) {
 	if i < 0 {
 		var zero T

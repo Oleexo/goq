@@ -69,6 +69,29 @@ func TestWhereErr(t *testing.T) {
 	}
 }
 
+// Where is the pure counterpart to WhereErr and has no test of its own
+// elsewhere; this exercises it directly rather than only through WhereErr.
+func TestTryQueryWhere(t *testing.T) {
+	t.Parallel()
+	got, err := goq.From([]int{1, 2, 3, 4}).AsTry().
+		Where(func(i int) bool { return i%2 == 0 }).
+		ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if d := cmp.Diff([]int{2, 4}, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+
+	// Errors from an earlier stage pass through Where untouched.
+	if _, err := goq.From([]string{"x"}).
+		SelectErr(func(_ string) (int, error) { return 0, errBoom }).
+		Where(func(int) bool { return true }).
+		ToSlice(context.Background()); !errors.Is(err, errBoom) {
+		t.Errorf("err = %v, want errBoom", err)
+	}
+}
+
 func TestSelectCtxReceivesTerminalContext(t *testing.T) {
 	t.Parallel()
 	type key struct{}

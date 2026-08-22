@@ -455,7 +455,7 @@ func parMap[T, R any](
 					// Reorder sink: hold results back until the next expected
 					// index arrives. The admission gate above is what actually
 					// keeps pending from growing past window-1 entries: the
-					// producer never dispatches an item more than window
+					// producer never dispatches an item more than window-1
 					// ahead of next, so at most window-1 results can ever
 					// arrive here before the one pending needs.
 					pending := make(map[int]parResult[R], window)

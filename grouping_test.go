@@ -146,3 +146,71 @@ func TestGroupItemsAreInSourceOrder(t *testing.T) {
 		t.Errorf("group items out of source order (-want +got):\n%s", d)
 	}
 }
+
+// Count reports the number of groups, not the number of items.
+func TestGroupQueryCount(t *testing.T) {
+	t.Parallel()
+	if n := goq.From(staff()).GroupBy(func(e emp) string { return e.Dept }).Count(); n != 2 {
+		t.Errorf("Count = %d, want 2", n)
+	}
+	if n := goq.Empty[emp]().GroupBy(func(e emp) string { return e.Dept }).Count(); n != 0 {
+		t.Errorf("Count on empty source = %d, want 0", n)
+	}
+}
+
+// ThenByDesc has no dedicated test elsewhere: TestGroupQueryOrderByDescThenBy
+// exercises ThenBy, but nothing exercises ThenByDesc's own direction. hr=1
+// sorts first ascending by group size; ops=2 and eng=2 tie, and ThenByDesc
+// breaks the tie DESCENDING by key, putting "ops" before "eng". A wrong
+// direction (ascending) would give [hr, eng, ops] instead.
+func TestGroupQueryThenByDesc(t *testing.T) {
+	t.Parallel()
+	got := goq.From(groupOrderingFixture()).
+		GroupBy(func(e emp) string { return e.Dept }).
+		OrderBy(func(g goq.Group[string, emp]) int { return len(g.Items) }).
+		ThenByDesc(func(g goq.Group[string, emp]) string { return g.Key }).
+		Select(func(g goq.Group[string, emp]) string { return g.Key }).
+		ToSlice()
+	if d := cmp.Diff([]string{"hr", "ops", "eng"}, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+}
+
+// The zero GroupQuery must behave as empty across every operator and
+// terminal, not merely the first one anyone happens to call.
+func TestZeroValueGroupQueryOperatorsDoNotPanic(t *testing.T) {
+	t.Parallel()
+	var g goq.GroupQuery[string, int]
+
+	for range g.Seq() {
+		t.Error("Seq yielded an element from the zero value")
+	}
+	if got := g.ToSlice(); len(got) != 0 {
+		t.Errorf("ToSlice = %v, want empty", got)
+	}
+	if n := g.Count(); n != 0 {
+		t.Errorf("Count = %d, want 0", n)
+	}
+	keyOf := func(gr goq.Group[string, int]) string { return gr.Key }
+	if got := g.Where(func(goq.Group[string, int]) bool { return true }).ToSlice(); len(got) != 0 {
+		t.Errorf("Where.ToSlice = %v, want empty", got)
+	}
+	if got := g.OrderBy(keyOf).ToSlice(); len(got) != 0 {
+		t.Errorf("OrderBy.ToSlice = %v, want empty", got)
+	}
+	if got := g.OrderByDesc(keyOf).ToSlice(); len(got) != 0 {
+		t.Errorf("OrderByDesc.ToSlice = %v, want empty", got)
+	}
+	if got := g.ThenBy(keyOf).ToSlice(); len(got) != 0 {
+		t.Errorf("ThenBy.ToSlice = %v, want empty", got)
+	}
+	if got := g.ThenByDesc(keyOf).ToSlice(); len(got) != 0 {
+		t.Errorf("ThenByDesc.ToSlice = %v, want empty", got)
+	}
+	if got := g.Select(func(gr goq.Group[string, int]) int { return len(gr.Items) }).ToSlice(); len(got) != 0 {
+		t.Errorf("Select.ToSlice = %v, want empty", got)
+	}
+	if got := goq.GroupBy(g, func(gr goq.Group[string, int]) int { return len(gr.Items) }).ToSlice(); len(got) != 0 {
+		t.Errorf("package-level GroupBy.ToSlice = %v, want empty", got)
+	}
+}
