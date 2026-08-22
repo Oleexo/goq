@@ -76,18 +76,28 @@ func TestFromChanCancellation(t *testing.T) {
 	}
 }
 
-// The plan is parameterised by ctx, so one pipeline is reusable across
-// contexts. Memoize first, since the underlying channel is single-shot.
+// TestTryQueryIsReusableAcrossContexts exercises the point of the
+// plan-parameterised design: the SAME TryQuery value, enumerated under two
+// different contexts, must behave according to each. A memoized query cannot
+// demonstrate this — it replays its cache without consulting the second
+// context — so this uses AsTry, whose plan re-checks ctx.Err() per element.
 func TestTryQueryIsReusableAcrossContexts(t *testing.T) {
 	t.Parallel()
-	q := goq.FromChan(closedChan(1, 2)).Memoize()
-	if _, err := q.ToSlice(context.Background()); err != nil {
-		t.Fatalf("err = %v", err)
+	q := goq.From([]int{1, 2, 3}).AsTry()
+
+	got, err := q.ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("first enumeration err = %v, want nil", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	if d := cmp.Diff([]int{1, 2, 3}, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := q.ToSlice(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want nil or Canceled", err)
+	if _, err := q.ToSlice(cancelled); !errors.Is(err, context.Canceled) {
+		t.Errorf("second enumeration err = %v, want context.Canceled — "+
+			"the plan is not consulting its context argument", err)
 	}
 }
 

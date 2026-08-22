@@ -140,6 +140,10 @@ func (q TryQuery[T]) Count(ctx context.Context) (int, error) {
 // it must not be used on an unbounded source. The context of the first
 // enumeration is the one that governs; later enumerations replay the cached
 // outcome without consulting their own.
+//
+// Enumerating the result consumes the underlying source, so a single-shot
+// source's original handle will report ErrConsumed afterwards even if it was
+// never enumerated directly — there is only one source, and it has been read.
 func (q TryQuery[T]) Memoize() TryQuery[T] {
 	var (
 		once   sync.Once
