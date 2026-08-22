@@ -274,6 +274,15 @@ a time — over a concurrent source.
 - Unordered by default. `AsOrdered()` tags elements with sequence numbers
   and reassembles them in a sink buffer capped at `window` — that cap is
   what bounds memory when a single element is pathologically slow.
+- **The cap is enforced by a producer-side admission gate, not by the sink.**
+  The producer blocks before dispatching index `i` until `i < emitted +
+  window`, so at most `window` results can ever be outstanding. An earlier
+  design merely *checked* the sink's size and errored when exceeded, which
+  bounded nothing and — worse — fired during correct execution whenever
+  `window` was smaller than the in-flight capacity (`Workers(8)` with
+  `Window(1)` can legitimately have ~17 results outstanding). The gate must
+  select on `ctx.Done()`, or cancelling a pipeline deadlocks on joining the
+  producer.
 - Options: `Workers(n)` (default `runtime.GOMAXPROCS(0)`), `Window(n)`
   (default `4×workers`), `AsOrdered()`.
 - Cancellation and error both funnel through a derived ctx with `defer
