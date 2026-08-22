@@ -4,7 +4,7 @@ sidebar_position: 3
 
 # Operators
 
-goq ships 52 query operators plus 8 source constructors, all Go-native in
+goq ships 56 query operators plus 8 source constructors, all Go-native in
 naming (`ToSlice` rather than `ToArray`, `OrderByDesc` rather than
 `OrderByDescending`). This page is the full inventory. Per-symbol
 documentation — parameters, exact behaviour, edge cases — lives in godoc at
@@ -17,18 +17,48 @@ before you read the doc comment.
 | Family | Operators |
 |---|---|
 | Restriction | `Where` |
-| Projection | `Select[R]`, `SelectMany[R]`, `Zip[U,R]` |
+| Projection | `Select[R]`, `SelectIndex[R]`, `SelectMany[R]`, `SelectManySeq[R]`, `Zip[U,R]` |
 | Partitioning | `Take`, `TakeWhile`, `TakeLast`, `Skip`, `SkipWhile`, `SkipLast`, `Chunk` |
-| Ordering | `OrderBy[K]`, `OrderByDesc[K]`, `ThenBy[K]`, `ThenByDesc[K]`, `Reverse` |
+| Ordering | `OrderBy[K]`, `OrderByDesc[K]`, `OrderByFunc`, `ThenBy[K]`, `ThenByDesc[K]`, `Reverse` |
 | Grouping | `GroupBy[K]`, `GroupBySelect[K,R]`, `ToLookup[K]` |
 | Joins | `Join[U,K,R]`, `GroupJoin[U,K,R]` |
 | Sets | `Distinct`, `DistinctBy[K]`, `Concat`, `Union`, `UnionBy[K]`, `Intersect`, `IntersectBy[K]`, `Except`, `ExceptBy[K]` |
 | Aggregation | `Aggregate[A]`, `Count`, `Sum[N]`, `Min`, `MinBy[K]`, `Max`, `MaxBy[K]`, `Average[N]` |
 | Elements | `First`, `Last`, `Single`, `ElementAt` |
-| Quantifiers | `Any`, `All`, `Contains`, `SequenceEqual` |
+| Quantifiers | `Any`, `AnyWhere`, `All`, `Contains`, `SequenceEqual` |
 | Materialize | `ToSlice`, `ToMap[K]`, `ToMapLast[K]`, `ToSet`, `Memoize` |
 | Interop | `Seq` |
 | Generators | `From`, `FromSeq`, `FromSeqTry`, `FromMap`, `FromChan`, `Range`, `Repeat`, `Empty` |
+
+`ForEach` is deliberately not in this table — see
+[ForEach: the side-effecting terminal](#foreach-the-side-effecting-terminal)
+below for why.
+
+### Four names worth a closer look
+
+Four operators above aren't self-explanatory from their name alone:
+
+- **`SelectIndex[R](f func(int, T) R) Query[R]`** is `Select` with a
+  zero-based element index passed alongside each element — reach for it
+  when the projection needs to know an element's position, not just its
+  value (numbering rows, alternating behaviour by parity, and so on).
+- **`SelectManySeq[R](f func(T) iter.Seq[R]) Query[R]`** is `SelectMany`
+  for callers whose inner sequence is itself lazy or unbounded. `SelectMany`
+  takes `func(T) []R` — a slice, which must already exist in full. Reach for
+  `SelectManySeq` instead when building that slice up front would be
+  wasteful (a large or expensive-to-materialise expansion per element) or
+  impossible (the inner sequence doesn't terminate).
+- **`OrderByFunc(cmpFn func(a, b T) int) OrderedQuery[T]`** sorts by an
+  explicit three-way comparison instead of a `cmp.Ordered` key. Reach for
+  it when an element's ordering isn't expressible as a single sortable key
+  at all — a case-insensitive string comparison, a comparison that needs to
+  look at two fields together as one decision rather than as `OrderBy` plus
+  a `ThenBy` tie-breaker, or any comparison whose logic doesn't reduce to
+  "compute a key, then compare keys."
+- **`AnyWhere(pred func(T) bool) bool`** is `Any` with a predicate baked in,
+  equivalent to `Where(pred).Any()` but without building the intermediate
+  `Query`. It is what the C# → goq mapping table below lists as the
+  equivalent of `Any(predicate)`.
 
 ## Return shapes
 
@@ -79,6 +109,28 @@ table and the warning about unbounded sources. In short: `OrderBy`,
 `GroupBy`, `Reverse`, and the set operators all fully materialise their
 source before yielding anything, so none of them terminate on an
 unbounded `FromChan` stream that never closes.
+
+## ForEach: the side-effecting terminal
+
+`ForEach(ctx, fn func(T) error) error` is not in the inventory table above
+and is not counted in the "56 query operators" figure, because unlike the
+`...Err`/`...Ctx` variants it isn't a fallible or context-aware form of an
+existing `Query` operator — it has no `Query[T]` equivalent at all. It only
+exists on **`TryQuery`** and **`ParQuery`**, as the terminal for
+side-effecting work: it calls `fn` for each element, stopping at the first
+error from either the pipeline or `fn`.
+
+```go
+err := goq.From(xs).AsTry().ForEach(ctx, func(x int) error {
+    return process(x)
+})
+```
+
+On `ParQuery`, `fn` runs on the caller's goroutine and is never invoked
+concurrently, even though elements complete out of order across the
+worker pool — so `fn` itself never needs its own synchronization. See
+[Async and parallel](./async-and-parallel.md) for the rest of the
+`TryQuery`/`ParQuery` surface.
 
 ## Functions, not methods
 

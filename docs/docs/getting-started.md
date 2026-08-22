@@ -123,18 +123,26 @@ all.
 
 | Behaviour | Operators |
 |---|---|
-| Streaming — O(1) extra memory | `Where`, `Select`, `SelectMany`, `Take`, `TakeWhile`, `Skip`, `SkipWhile`, `Zip`, `Concat`, `Chunk`, `Any`, `All`, `Contains`, `First`, `ElementAt`, `Count`, `Sum`, `Aggregate` |
+| Streaming — O(1) extra memory | `Where`, `Select`, `SelectIndex`, `SelectMany`, `SelectManySeq`, `Take`, `TakeWhile`, `Skip`, `SkipWhile`, `Zip`, `Concat`, `Chunk`, `Any`, `AnyWhere`, `All`, `Contains`, `First`, `ElementAt`, `Count`, `Sum`, `Aggregate` |
+| Streaming, but retains a growing key set | `Distinct`, `DistinctBy`, `Union`, `UnionBy` — each yields as it goes, but keeps every distinct element or key seen so far, so memory grows with how many *distinct* values have appeared, not with the size of the source |
 | Bounded buffer | `TakeLast(n)`, `SkipLast(n)` — retain `n` elements |
-| Full materialisation | `OrderBy`, `ThenBy`, `Reverse`, `GroupBy`, `ToLookup`, `Distinct`, `DistinctBy`, `Union`, `Intersect`, `Except` and their `...By` forms, `Memoize`, `ToSlice`, `ToMap`, `ToSet` |
-| Materialises the *argument*, streams the receiver | `Intersect`, `Except`, `Union` build a set from the other sequence first |
+| Full materialisation | `OrderBy`, `OrderByFunc`, `ThenBy`, `ThenByDesc`, `Reverse`, `GroupBy`, `ToLookup`, `Memoize`, `ToSlice`, `ToMap`, `ToSet` |
+| Materialises the *argument*, streams the receiver | `Intersect`, `IntersectBy`, `Except`, `ExceptBy` build a set from the *other* sequence first, then stream the receiver |
 
 `Last`, `Single`, `Min`, `Max`, and `Average` stream in O(1) memory but must
 reach the end of the source to answer, so they too never return on an
 unbounded stream.
 
-**`OrderBy`, `GroupBy`, `Reverse`, and the set operators never yield on an
-unbounded source.** Put one after a `FromChan` pipeline that never closes and
-the terminal blocks forever waiting for a value it cannot produce.
+**`OrderBy`, `GroupBy`, `Reverse`, and their relatives in the "full
+materialisation" row never yield on an unbounded source.** Put one after a
+`FromChan` pipeline that never closes and the terminal blocks forever
+waiting for a value it cannot produce. `Distinct` and `Union` (and their
+`...By` forms) are *not* in that group — they yield progressively and are
+safe on an unbounded source, at the cost of an ever-growing key set.
+`Intersect` and `Except` (and their `...By` forms) sit in between: the
+*receiver* can be unbounded and they will keep yielding matches from it,
+but the *argument* must be finite, because they buffer it completely
+before yielding anything at all.
 
 ## Re-enumeration
 
