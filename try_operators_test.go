@@ -128,3 +128,60 @@ func TestTryAggregateAndForEach(t *testing.T) {
 		t.Errorf("ForEach visited %d elements, want 2", seen)
 	}
 }
+
+func TestTrySelectMany(t *testing.T) {
+	t.Parallel()
+	got, err := goq.From([]int{1, 2, 3}).AsTry().
+		SelectMany(func(i int) []int { return []int{i, i * 10} }).
+		ToSlice(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if d := cmp.Diff([]int{1, 10, 2, 20, 3, 30}, got); d != "" {
+		t.Errorf("mismatch (-want +got):\n%s", d)
+	}
+
+	_, err = goq.From([]string{"x"}).
+		SelectErr(func(_ string) (int, error) { return 0, errBoom }).
+		SelectMany(func(i int) []int { return []int{i, i} }). // stage after a failure
+		ToSlice(context.Background())
+	if !errors.Is(err, errBoom) {
+		t.Errorf("err = %v, want errBoom", err)
+	}
+}
+
+// A zero-value TryQuery is constructible from outside the package. Seq
+// tolerates it; operators built through lift must too.
+func TestZeroValueTryQueryOperatorsDoNotPanic(t *testing.T) {
+	t.Parallel()
+	var q goq.TryQuery[int]
+
+	got, err := q.Select(func(i int) int { return i * 2 }).ToSlice(context.Background())
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+// lift must carry the single-shot guard forward, so ErrConsumed still reaches
+// the terminal through intermediate operators. Without the propagation this
+// second enumeration would silently yield nothing instead of erroring.
+func TestGuardPropagatesThroughLift(t *testing.T) {
+	t.Parallel()
+	ch := make(chan int, 1)
+	ch <- 1
+	close(ch)
+
+	q := goq.FromChan(ch).Select(func(i int) int { return i * 2 })
+	ctx := context.Background()
+
+	if _, err := q.ToSlice(ctx); err != nil {
+		t.Fatalf("first enumeration err = %v, want nil", err)
+	}
+	if _, err := q.ToSlice(ctx); !errors.Is(err, goq.ErrConsumed) {
+		t.Errorf("second enumeration err = %v, want ErrConsumed — "+
+			"lift is not propagating the single-shot guard", err)
+	}
+}

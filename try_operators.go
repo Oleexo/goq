@@ -5,6 +5,20 @@ import (
 	"iter"
 )
 
+// planOf returns q's plan, or an empty plan when q is the zero value.
+//
+// A zero-value TryQuery is constructible from outside the package, and Seq
+// already tolerates it. Operators built through lift must tolerate it too:
+// without this, applying any operator to a zero value panics on a nil plan.
+func planOf[T any](q TryQuery[T]) func(context.Context) iter.Seq2[T, error] {
+	if q.plan == nil {
+		return func(context.Context) iter.Seq2[T, error] {
+			return func(func(T, error) bool) {}
+		}
+	}
+	return q.plan
+}
+
 // lift builds a TryQuery from a stage function, preserving the single-shot
 // guard so that ErrConsumed still reaches the terminal through any number of
 // intermediate operators.
@@ -15,7 +29,7 @@ func lift[T, R any](
 	return TryQuery[R]{
 		guard: q.guard,
 		plan: func(ctx context.Context) iter.Seq2[R, error] {
-			return stage(ctx, q.plan(ctx))
+			return stage(ctx, planOf(q)(ctx))
 		},
 	}
 }
