@@ -10,7 +10,8 @@ import (
 type Group[K comparable, V any] struct {
 	// Key is the value the grouping function returned for every item.
 	Key K
-	// Items are the source elements in the group, in source order.
+	// Items are the source elements in the group, in source order. The slice is
+	// the caller's to read and mutate; mutations affect only that caller's copy.
 	Items []V
 }
 
@@ -39,7 +40,8 @@ func (q Query[T]) GroupBy[K comparable](key func(T) K) GroupQuery[K, T] {
 }
 
 // GroupBySelect groups the elements by key and projects each group, returning a
-// Query so the chain continues normally.
+// Query so the chain continues normally. It buffers the entire source, so it
+// never yields on an unbounded source.
 func (q Query[T]) GroupBySelect[K comparable, R any](
 	key func(T) K, sel func(Group[K, T]) R,
 ) Query[R] {
@@ -155,6 +157,8 @@ func (g GroupQuery[K, T]) Count() int {
 // It is a function rather than a method on GroupQuery because a method whose
 // result element type derives from the receiver's is an instantiation cycle;
 // a function is instantiated per call site and so terminates.
+//
+// It buffers the entire source, so it never yields on an unbounded source.
 func GroupBy[K comparable, T any, K2 comparable](
 	g GroupQuery[K, T], key func(Group[K, T]) K2,
 ) GroupQuery[K2, Group[K, T]] {
