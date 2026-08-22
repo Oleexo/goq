@@ -51,6 +51,9 @@ func TestSumMethodAndFunction(t *testing.T) {
 	if got := goq.Sum(goq.Empty[int]()); got != 0 {
 		t.Errorf("Sum on empty = %d, want 0", got)
 	}
+	if got := goq.Empty[lineItem]().Sum(func(l lineItem) float64 { return l.Price }); got != 0 {
+		t.Errorf("Sum method on empty = %v, want 0", got)
+	}
 }
 
 func TestAverage(t *testing.T) {
@@ -89,6 +92,9 @@ func TestMinMax(t *testing.T) {
 	if _, ok := goq.Min(goq.Empty[int]()); ok {
 		t.Error("Min on empty reported ok")
 	}
+	if _, ok := goq.Max(goq.Empty[int]()); ok {
+		t.Error("Max on empty reported ok")
+	}
 	// MinBy/MaxBy return the ELEMENT, not the key.
 	if v, ok := goq.From(items()).MaxBy(func(l lineItem) float64 { return l.Price }); !ok || v.SKU != "b" {
 		t.Errorf("MaxBy = (%v, %v), want SKU b", v, ok)
@@ -100,5 +106,11 @@ func TestMinMax(t *testing.T) {
 	tie := []lineItem{{"first", 1, 0}, {"second", 1, 0}}
 	if v, _ := goq.From(tie).MinBy(func(l lineItem) float64 { return l.Price }); v.SKU != "first" {
 		t.Errorf("MinBy tie = %v, want first", v.SKU)
+	}
+	if _, ok := goq.Empty[lineItem]().MinBy(func(l lineItem) float64 { return l.Price }); ok {
+		t.Error("MinBy on empty reported ok")
+	}
+	if _, ok := goq.Empty[lineItem]().MaxBy(func(l lineItem) float64 { return l.Price }); ok {
+		t.Error("MaxBy on empty reported ok")
 	}
 }
