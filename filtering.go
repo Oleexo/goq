@@ -38,7 +38,7 @@ func (q Query[T]) SkipWhile(pred func(T) bool) Query[T] {
 	return Query[T]{seq: seqcore.SkipWhile(q.Seq(), pred)}
 }
 
-// SkipLast yields every element except the final n, retaining at most n
+// SkipLast yields every element except the final n, retaining at most n+1
 // elements at a time. It streams with a bounded buffer.
 func (q Query[T]) SkipLast(n int) Query[T] {
 	return Query[T]{seq: seqcore.SkipLast(q.Seq(), n)}

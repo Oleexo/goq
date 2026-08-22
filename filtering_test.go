@@ -75,3 +75,47 @@ func TestTakeLastTerminatesOnFiniteOnly(t *testing.T) {
 		t.Errorf("mismatch (-want +got):\n%s", d)
 	}
 }
+
+// TakeLast and SkipLast promise O(n) memory regardless of source length. That
+// promise is invisible to an output-equality test: a "collect everything, then
+// slice" implementation would satisfy every other test in this file. This
+// asserts the promise directly via allocated bytes, which separates the two
+// shapes by several orders of magnitude (measured: ~0 B/op bounded vs ~8 MB/op
+// for collect-then-slice over 200k elements).
+//
+// It deliberately does not call t.Parallel: testing.Benchmark drives its own
+// iteration count and should not compete with other parallel tests.
+func TestTakeLastAndSkipLastAreMemoryBounded(t *testing.T) {
+	const (
+		sourceLen  = 100_000
+		maxBytesOp = 64 << 10 // 64 KiB
+	)
+
+	// Consume through Seq rather than ToSlice: SkipLast yields almost the whole
+	// source, and materialising that would dwarf the buffer we are measuring.
+	drain := func(q goq.Query[int]) {
+		for v := range q.Seq() {
+			_ = v // consume all elements
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func()
+	}{
+		{"TakeLast", func() { drain(goq.Range(0, sourceLen).TakeLast(2)) }},
+		{"SkipLast", func() { drain(goq.Range(0, sourceLen).SkipLast(2)) }},
+	} {
+		res := testing.Benchmark(func(b *testing.B) {
+			b.Helper()
+			for range b.N {
+				tc.run()
+			}
+		})
+		if got := res.AllocedBytesPerOp(); got > maxBytesOp {
+			t.Errorf("%s allocated %d B/op over a %d-element source, want <= %d — "+
+				"the operator is buffering the whole source instead of a bounded window",
+				tc.name, got, sourceLen, maxBytesOp)
+		}
+	}
+}

@@ -117,7 +117,7 @@ func TakeLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 	}
 }
 
-// SkipLast yields every element of s except the final n. It retains at most n
+// SkipLast yields every element of s except the final n. It retains at most n+1
 // elements at a time.
 func SkipLast[T any](s iter.Seq[T], n int) iter.Seq[T] {
 	return func(yield func(T) bool) {
