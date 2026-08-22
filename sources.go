@@ -1,6 +1,7 @@
 package goq
 
 import (
+	"context"
 	"iter"
 	"maps"
 	"slices"
@@ -69,4 +70,64 @@ func Repeat[T any](v T, count int) Query[T] {
 // Empty returns a Query that yields no elements.
 func Empty[T any]() Query[T] {
 	return Query[T]{seq: func(func(T) bool) {}}
+}
+
+// FromChan returns a single-shot TryQuery over a channel.
+//
+// Enumeration ends when the channel is closed, and yields the context's error
+// if the context is cancelled first. The channel is not drained on
+// cancellation, so a producer blocked on an unbuffered send stays blocked
+// unless it also selects on the same context.
+//
+// The result is single-shot: a second enumeration returns ErrConsumed rather
+// than silently yielding nothing. Call Memoize to make it re-enumerable.
+func FromChan[T any](ch <-chan T) TryQuery[T] {
+	return TryQuery[T]{
+		guard: &singleShot{},
+		plan: func(ctx context.Context) iter.Seq2[T, error] {
+			return func(yield func(T, error) bool) {
+				for {
+					select {
+					case <-ctx.Done():
+						var zero T
+						yield(zero, ctx.Err())
+						return
+					case v, open := <-ch:
+						if !open {
+							return
+						}
+						if !yield(v, nil) {
+							return
+						}
+					}
+				}
+			}
+		},
+	}
+}
+
+// FromSeqTry returns a single-shot TryQuery over an existing iterator.
+//
+// Use it in preference to FromSeq when the iterator can only be enumerated
+// once: a second enumeration returns ErrConsumed rather than silently yielding
+// nothing, which FromSeq cannot report because Query's terminals have no error
+// return.
+func FromSeqTry[T any](s iter.Seq[T]) TryQuery[T] {
+	return TryQuery[T]{
+		guard: &singleShot{},
+		plan: func(ctx context.Context) iter.Seq2[T, error] {
+			return func(yield func(T, error) bool) {
+				for v := range s {
+					if err := ctx.Err(); err != nil {
+						var zero T
+						yield(zero, err)
+						return
+					}
+					if !yield(v, nil) {
+						return
+					}
+				}
+			}
+		},
+	}
 }
