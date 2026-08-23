@@ -80,6 +80,7 @@ pipeline: building the chain only composes closures.
 
 - Docs site: <https://oleexo.github.io/goq/>
 - API reference: <https://pkg.go.dev/github.com/oleexo/goq>
+- What is shipped and what is not: [ROADMAP.md](./ROADMAP.md)
 
 ## License
 
